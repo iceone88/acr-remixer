@@ -41,7 +41,8 @@ def generate(points: np.ndarray, step: float) -> list[Pacenote]:
         if (j - i) * step >= 8:   # ignore tiny wiggles
             kmax = np.abs(k[i : j + 1]).max()
             # Game pacenote tokens (DT_Pacenote* vocabulary): Left3, RightHP, Long ...
-            side = "Left" if k[i] > 0 else "Right"
+            # UE is left-handed (x forward, y right): a growing heading is a right turn.
+            side = "Right" if k[i] > 0 else "Left"
             call = _call(1 / kmax)
             text = f"{side}HP" if call == "hairpin" else f"{side}{call}"
             if (j - i) * step > 160:
