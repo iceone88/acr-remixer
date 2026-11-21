@@ -62,13 +62,22 @@ class Comp:
         return (self.rule.L - 5) not in self.present
 
 
-def _class_rules(pk: Package) -> dict[int, Rule]:
-    votes: dict[int, dict[str, int]] = {}
+def _class_rules(pk: Package, votes: dict | None = None) -> dict[int, Rule]:
+    votes = {} if votes is None else votes
     for e in pk.exports:
         key = _REPRESENTATIVE.get(e.name)
         if key:
             votes.setdefault(e.class_index, {}).setdefault(key, 0)
             votes[e.class_index][key] += 1
+    return {cls: RULES[max(v, key=v.get)] for cls, v in votes.items()}
+
+
+def learn_rules(pkgs) -> dict[int, Rule]:
+    """Class rules voted over several packages. Script class import indices are
+    global hashes, so a rule learned in one World Partition cell applies to all."""
+    votes: dict = {}
+    for pk in pkgs:
+        _class_rules(pk, votes)
     return {cls: RULES[max(v, key=v.get)] for cls, v in votes.items()}
 
 
@@ -82,8 +91,8 @@ def _sane(loc, rot, scale) -> bool:
     return True
 
 
-def decode_components(pk: Package) -> list[Comp]:
-    rules = _class_rules(pk)
+def decode_components(pk: Package, rules: dict | None = None) -> list[Comp]:
+    rules = _class_rules(pk) if rules is None else rules
     d = pk.d
     out = []
     for i, e in enumerate(pk.exports):

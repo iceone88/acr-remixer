@@ -39,10 +39,66 @@ BUILD_CUT = CutConfig(max_curvature=1 / 90, max_grade_change=0.05, window_m=16.0
                       min_len=200.0, max_len=700.0, anchor_ends=True)
 
 
+def _build_wp(a, paks: str) -> int:
+    """Base-game World Partition level: tile-aligned recombination."""
+    from .build import writers as W
+    from .build.wp import build_wp_stage
+    from .extract.iostore import GameFS
+    from .extract.real import load_wp_source
+    from .extract.zen import Package
+    from .tiles import TileGrid, TileSearchConfig, find_cuts, make_ranges, tile_search
+    fs = GameFS(paks, include_mods=False)
+    ws = load_wp_source(fs, a.level)
+    st = ws.stage
+    meshes, *_ = W.read_baked_raw(Package(fs.read(ws.baked)))
+    grid = TileGrid.from_baked(meshes)
+    cuts = find_cuts(st, grid, 2.0)
+    cfg = TileSearchConfig(target_length=a.length, seed=a.seed)
+    ranges = make_ranges(st, grid, cuts, 2.0, cfg.min_len, cfg.max_len)
+    print(f"{st.name}: {(len(st.points)-1)*2/1000:.2f} km, {len(grid.tiles)} tiles of {grid.cell:.0f} m, "
+          f"{len(cuts)-2} usable tile crossings, {len(ranges)} candidate pieces")
+    t = time.time()
+    best = tile_search(st, ranges, cuts, cfg)
+    if best is None:
+        print("no layout found; try another --seed or --length")
+        return 1
+    layout = build_layout(best, 2.0)
+    order = " ".join(p.segment_id.split("#")[1] + ("r" if p.reversed else "") for p in layout.pieces)
+    print(f"layout {layout.length/1000:.2f} km in {time.time()-t:.1f}s: pieces {order}, "
+          f"kinks {', '.join(f'{k:+.0f}' for k in best.kinks)} deg, {len(layout.pacenotes)} calls")
+    out = os.path.join(a.out, f"{a.level}_seed{a.seed}")
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "layout.json"), "w") as f:
+        f.write(to_json(layout, {"seed": a.seed, "source": "game", "level": a.level}))
+    plot_layout(layout, os.path.join(out, "layout.png"),
+                f"{a.level} seed {a.seed}: {layout.length/1000:.2f} km ({order})", 40)
+    rep = build_wp_stage(layout, best, cuts, grid, ws, paks, out)
+    from .build.preview import render_collision
+    fwd = next(p for p, k in ws.route_cells.items() if k == "fwd")
+    render_collision(rep.out_files[0], ws.baked, fwd, os.path.join(out, "collision.png"),
+                     f"{a.level} seed {a.seed}: built collision (start o, finish #)")
+    print(f"placed at offset {tuple(float(x) for x in rep.offset)} m; {rep.packages} packages rewritten; moved " +
+          ", ".join(f"{k} {v}" for k, v in rep.moved.most_common(12)))
+    for r in rep.relocated:
+        print(f"  relocated {r[0][:40]} {r[1]} m -> {r[2]} m")
+    dropped = sum(c[2] for c in rep.clipped); total = sum(c[3] for c in rep.clipped)
+    print(f"tile meshes clipped: {len(rep.clipped)} ({dropped}/{total} triangles hidden); "
+          f"baked: {rep.baked_meshes} meshes, {rep.baked_tris} triangles; pacenotes {rep.notes}")
+    for c in rep.checks:
+        print("  check:", c)
+    for f_ in rep.out_files:
+        print("  wrote", f_)
+    return 0
+
+
 def _build(a) -> int:
     from .build.stage import build_stage
+    from .extract.iostore import GameFS
     from .extract.real import DEFAULT_PAKS, load_location
     paks = a.paks or DEFAULT_PAKS
+    fs = GameFS(paks, include_mods=False)
+    if any(p.startswith(f"acr/Content/Levels/{a.level}/_Generated_/") for p in fs.index):
+        return _build_wp(a, paks)
     stages = [s for s in load_location(a.level, paks) if s.name == a.level]
     if not stages:
         print(f"level {a.level!r} not found or not readable (try `list`)")

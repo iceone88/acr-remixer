@@ -179,6 +179,8 @@ class TState:
     def pieces(self) -> list[Piece]:
         return [s.piece for s in reversed(list(self.chain()))]
 
+    all_pieces = pieces          # layout.build_layout() interface
+
 
 def _coarse(pts, cfg):
     return pts[:: max(1, int(cfg.coarse_step / cfg.step)), :2]
