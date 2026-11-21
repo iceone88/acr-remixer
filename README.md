@@ -10,15 +10,21 @@ output is a small mod container that only references game/mod assets.
   Oodle-compressed and need an `oo2core_9_win64.dll` already on the machine
   (auto-detected, or set `ACR_OODLE_DLL`).
 - Generates layouts from real segments (any location).
-- **Builds an installable stage** by replacing the WRC Generations mod's
-  `WrcgEsSS1` level with a recombined version of itself. It is built and
-  self-verified by re-reading the output, but **not yet tested in-game**.
+- **Builds installable base-game stages** (World Partition levels, e.g.
+  `WalesS4HafrenSouth`): pieces are cut where the route crosses the 350 m
+  track-tile grid and joined grid line to grid line, so road and terrain meet
+  edge to edge; each tile's mesh and collision are clipped to its own road
+  corridor (no terrain walls from neighbouring pieces). The result currently
+  overrides the source stage (Forward + Reverse). See `stagegen/tiles.py`,
+  `stagegen/build/wp.py`.
+- Not moved yet on base-game builds: trees/grass (foliage instances), respawn
+  planes, replay cameras; Cut variants are not supported.
 
 ```
 py -m stagegen.cli list                                   # levels found in the install
 py -m stagegen.cli generate --location Wales --length 10000 --seed 2 --out out/
-py -m stagegen.cli build --level WrcgEsSS1 --length 5500 --seed 0 --out out
-py -m stagegen.cli install out/WrcgEsSS1_seed0           # copies 3 files into acr/Content/Paks/~mods
+py -m stagegen.cli build --level WalesS4HafrenSouth --length 4500 --seed 1 --out out
+py -m stagegen.cli install out/WalesS4HafrenSouth_seed1  # copies 3 files into acr/Content/Paks/~mods
 py -m stagegen.cli uninstall                              # deletes them again -> original SS1 back
 ```
 (Use the full path to Python 3.14: `%LOCALAPPDATA%\Programs\Python\Python314\python.exe`; needs numpy, scipy, matplotlib.)
