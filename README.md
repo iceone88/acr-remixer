@@ -1,77 +1,63 @@
-# acr-stagegen
+﻿# acr-stagegen
 
 Generate new Assetto Corsa Rally stages by recombining road segments from the
-stages you already own. It runs on your own install and is meant to reference
-the game's assets in place, so mods never redistribute scanned geometry.
+stages you already own. Everything is read in place from your install; the
+output is a small mod container that only references game/mod assets.
 
-**Status:** layout generator works on synthetic data. Nothing touches the game yet.
-
-```
-python3 -m stagegen.cli generate --fake --length 10000 --seed 3 --out out/
-```
-
-Writes `out/stage_seed3.json` (the layout manifest) and `out/stage_seed3.png`
-(map + elevation profile).
-
-## How it works
-
-1. **Cut** (`segments.py`): split each source stage at "quiet" points:
-   radius > 250 m, steady grade and steady width over ±30 m. Segments are
-   250–1200 m long.
-2. **Search** (`search.py`): beam search that chains segments, forwards or
-   reversed, from one location and surface. For each joint:
-   - The segment is placed using **only yaw + translation**. Scans are never
-     tilted.
-   - A short **connector** (`connector.py`, 40–160 m) bridges the joint. Its
-     horizontal Hermite curve allows ±25° of bend, and its vertical Hermite
-     matches both grades so there's no slope step. Width blends linearly.
-   - **Corridor check:** a new piece may not come within 2 × corridor
-     half-width (default 70 m) of anything already laid down, so the scanned
-     scenery bands never overlap.
-   - Elevation range and connector grade are capped.
-   - Scoring prefers small grade/width mismatches, gentle bends, little
-     connector road, and variety of source stages. A seeded per-segment bias
-     makes each seed give a different stage.
-3. **Pacenotes** (`pacenotes.py`): forward segments keep their **original
-   calls**, re-keyed to the new distance. Connectors and reversed segments get
-   generated calls from curvature (1–6 scale by minimum radius, "long",
-   "into", crests).
-4. **Manifest** (`layout.py`): for each piece it records the source segment,
-   direction, rigid transform and distance range. Connectors also carry their
-   centreline. A future build step consumes this.
-
-## Roadmap (needs a real install)
-
-- [ ] **Extract**: find where the route spline, road width, surface, pacenotes
-      and split/reset data live in the paks (UE 5.6, probably IoStore
-      `.utoc/.ucas`). Write a reader that produces `SourceStage` objects.
-- [ ] **Asset granularity**: are stage meshes and collision split into
-      reusable chunks, or baked into large World Partition cells / HLODs?
-      This decides whether segments can be placed by referencing base-game
-      assets.
-- [ ] **Build**: create a level that references the base-game assets by
-      `/Game/...` path with the manifest's transforms. Loft connector road and
-      collision meshes, clip the scenery where corridors meet, place
-      gates/resets, write pacenotes. Then cook it to a mod pak.
-- [ ] **Install/uninstall**: drop the pak into the mods folder and remove it
-      cleanly. Never modify the base game files.
-- [ ] Tune cut/joint thresholds on real roads, which are twistier and less
-      regular than the fake ones.
-- [ ] Speed: the search takes about 30 s in pure Python. Cache end states and
-      vectorise the overlap test.
-
-## Layout
+**Status (2026-11-21):**
+- Reads real game data: route splines, road width and original pacenotes for all
+  10 base-game stages and mod stages (~150 km of road). Base-game containers are
+  Oodle-compressed and need an `oo2core_9_win64.dll` already on the machine
+  (auto-detected, or set `ACR_OODLE_DLL`).
+- Generates layouts from real segments (any location).
+- **Builds an installable stage** by replacing the WRC Generations mod's
+  `WrcgEsSS1` level with a recombined version of itself. It is built and
+  self-verified by re-reading the output, but **not yet tested in-game**.
 
 ```
-stagegen/
-  geometry.py   polyline maths
-  model.py      SourceStage, Segment, EndState, Piece, Pacenote
-  segments.py   cut-point detection, segment end states
-  connector.py  joint geometry
-  search.py     beam search
-  pacenotes.py  curvature → calls
-  layout.py     flatten result, JSON manifest
-  plot.py       map + elevation PNG
-  fake.py       synthetic source stages
-  cli.py
+py -m stagegen.cli list                                   # levels found in the install
+py -m stagegen.cli generate --location Wales --length 10000 --seed 2 --out out/
+py -m stagegen.cli build --level WrcgEsSS1 --length 5500 --seed 0 --out out
+py -m stagegen.cli install out/WrcgEsSS1_seed0           # copies 3 files into acr/Content/Paks/~mods
+py -m stagegen.cli uninstall                              # deletes them again -> original SS1 back
 ```
+(Use the full path to Python 3.14: `%LOCALAPPDATA%\Programs\Python\Python314\python.exe`; needs numpy, scipy, matplotlib.)
+
+## How the build works (`stagegen/build/`)
+
+The generated stage takes over an existing stage slot through a higher-priority
+IoStore container (`pakchunk99-WrcgEsSS1_Stagegen_9_P`) that holds only three
+rewritten packages; every other asset is still served by the original mod.
+
+1. **Layout**: segments of the one level, with the opening segment (start area)
+   and closing segment (finish area) fixed, middle segments shuffled/reversed.
+2. **Level (.umap)**: root scene components of actors in the used segments are
+   moved with their segment's rigid transform to a fresh area next to the old
+   map (exact per-class decoding, see `level.py`). Intermediate split triggers
+   are re-placed along the new route in order. Route splines (centre, ideal,
+   borders, looped contour) are rebuilt. The RVT volumes are moved over the
+   new area so the road texture renders.
+3. **Physics (`DA_*BakedData`, dmphysics)**: collision triangles are split per
+   segment by distance along the source route, transformed, and connector
+   road + verges are lofted.
+4. **Pacenotes**: original calls carried over for forward segments; generated
+   (game token vocabulary) for reversed segments and connectors.
+5. **Container**: uncompressed TOC v8 + copied container header + `.pak` stub.
+
+### Known limitations
+- Connectors (~5-10 % of the stage) get collision plus a transplanted unused
+  terrain tile (with its RVT road-texture writer) aligned to the join; the
+  road there is visually approximate, and placements are rejected if the
+  tile's terrain would rise above the drivable road elsewhere.
+- Terrain tiles are 128 m; tiles near joints overlap or leave gaps.
+- Not moved: crowds' internal spline paths, foliage instance actors (HISM), TV
+  cameras outside used segments, physics state of cones (if stored separately).
+- The track list still shows the original SS1 name/length.
+- Base-game levels (World Partition) can be read but not yet rebuilt.
+
+## Reverse-engineered formats (`stagegen/extract/`)
+- `iostore.py` IoStore TOC v8 reader (Oodle via ctypes); `zen.py` zen package
+  header (5.5+ summary with cell maps); `unversioned.py` property headers.
+- `bakeddata.py` dmphysics BakedDataContainer (meshes in metres, axes x,up,y).
+- `splines.py` DMSplineComponent curves; `pacenote_table.py` PacenoteSplineEntry rows.
+- `build/cityhash.py` CityHash64 (verified against stored name hashes).
