@@ -1,4 +1,4 @@
-"""Build a recombined base-game (World Partition) stage as a mod container.
+﻿"""Build a recombined base-game (World Partition) stage as a mod container.
 
 What gets rewritten (everything else is still served by the game):
   * main level: streaming LoadingRange raised so every cell stays loaded
@@ -52,6 +52,7 @@ class WPConfig:
     terrain_clip: float = 80.0     # m: tile terrain kept this far either side of its road
     road_clip: float = 30.0
     range_ext: float = 80.0        # m: along-route slack at piece ends (tiles end at the grid line anyway)
+    end_radius: float = 400.0      # m: around the route ends (start/finish areas) keep everything this far
     margin: float = 1500.0         # m: gap between the original map and the new stage
     ctrl_spacing: float = 8.0
     loading_range_cm: float = 3.0e6
@@ -128,6 +129,11 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     new_head = headings(new_cl)
     src_head = headings(src.points)
 
+    def lat_ok(s, d, base):
+        """Lateral limit; widened at the route ends, where start/finish areas sit off the spline."""
+        end = (np.asarray(s) <= 50) | (np.asarray(s) >= L_src - 50)
+        return np.asarray(d) <= np.where(end, max(base, cfg.end_radius), base)
+
     def rigid(j, p_m, rot):
         pc = pieces[j]
         return pc.R @ p_m + pc.t, (rot if rot is not None else np.zeros(3)) + np.array([0, np.degrees(pc.yaw), 0])
@@ -181,9 +187,13 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             if c.rule.L == 26:                     # runtime virtual texture volume
                 lo = np.r_[new_cl[:, :2].min(0) - 300, new_cl[:, 2].min() - 150]
                 hi = np.r_[new_cl[:, :2].max(0) + 300, new_cl[:, 2].max() + 300]
-                payloads[path][c.export] = patched_payload(pk, c, lo * 100, c.rot if c.rot is not None
-                                                           else np.zeros(3), (hi - lo) * 100)
+                pl = patched_payload(pk, c, lo * 100, c.rot if c.rot is not None else np.zeros(3),
+                                     (hi - lo) * 100)
+                pl, dropped = _drop_streaming_mips(pl, pk.names)
+                payloads[path][c.export] = pl
                 rep.moved["RVT volume"] += 1
+                rep.checks.append("RVT: " + ("baked streaming low mips disabled (rendered live from the moved "
+                                             "geometry)" if dropped else "no streaming mips found"))
                 continue
             m = tile_re.match(owner)
             if m:
@@ -227,7 +237,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                     rep.relocated.append((f"{route}:{kind}", round(s), round(s_new)))
                 payloads[path][c.export] = patched_payload(pk, c, loc * 100, rot)
                 continue
-            if k >= 0 and d <= cfg.prop_lateral:
+            if k >= 0 and lat_ok(s, d, cfg.prop_lateral):
                 loc, rot = rigid(k, p_m, c.rot)
                 payloads[path][c.export] = patched_payload(pk, c, loc * 100, rot)
                 rep.moved[kind] += 1
@@ -281,7 +291,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             w = (cen_cm + pivot_cm) / 100
             d, idx = assign.tree.query(w[:, :2])
             s = idx * step
-            return (s >= pc.sa - cfg.range_ext) & (s <= pc.sb + cfg.range_ext) & (d <= lim)
+            return (s >= pc.sa - cfg.range_ext) & (s <= pc.sb + cfg.range_ext) & lat_ok(s, d, lim)
         return keep
 
     gen_dir = f"/{lvl}/GeneratedSplits/"
@@ -302,7 +312,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         pc = pieces[bd_piece]
         d, idx = assign.tree.query(w_m[:, :2])
         s = idx * step
-        return unc_ext[idx] & (s >= pc.sa - 40) & (s <= pc.sb + 40) & (d <= cfg.terrain_clip)
+        return unc_ext[idx] & (s >= pc.sa - 40) & (s <= pc.sb + 40) & lat_ok(s, d, cfg.terrain_clip)
 
     if bd_piece is not None:
         for name, pivot in bd_pivot.items():
@@ -336,7 +346,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             d, idx = assign.tree.query(cen[:, :2])
             s = idx * step
             lim = cfg.road_clip if b"Road" in m.soft_sub else cfg.terrain_clip
-            keep = (s >= pc.sa - cfg.range_ext) & (s <= pc.sb + cfg.range_ext) & (d <= lim)
+            keep = (s >= pc.sa - cfg.range_ext) & (s <= pc.sb + cfg.range_ext) & lat_ok(s, d, lim)
             k = np.where(keep, j, -1)
         elif re.search(rb"Terrain\d{4}", m.soft_sub):
             if bd_piece is None:
@@ -345,8 +355,8 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         elif b"PCGGrass" in m.soft_sub:
             continue                                   # grass/rock instances stay behind (not moved)
         else:
-            k, d, _, _ = assign(cen)
-            k[d > cfg.prop_lateral] = -1
+            k, d, s, _ = assign(cen)
+            k[~lat_ok(s, d, cfg.prop_lateral)] = -1
         for kk in np.unique(k[k >= 0]):
             sel = tri[k == kk]
             used, inv = np.unique(sel, return_inverse=True)
@@ -391,6 +401,25 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     rep.packages = len(new_pkgs)
     rep.checks += verify_wp(base + ".utoc", ws, new_pkgs, payloads, rules)
     return rep
+
+
+def _drop_streaming_mips(payload: bytes, names) -> tuple[bytes, bool]:
+    """RuntimeVirtualTextureComponent: remove StreamingTexture (12) and
+    StreamLowMips (13). The streaming texture is baked for the original map;
+    without it the whole RVT is rendered at runtime from the moved writers."""
+    from ..extract.unversioned import Reader
+    from .writers import _hdr_for
+    r = Reader(payload, 0)
+    h = r.header()
+    if not {12, 13} <= set(h) or [x for x in h if x < 12] != [0, 4]:
+        return payload, False
+    p = r.p
+    p += 16                                     # soft object path: two FNames
+    n = struct.unpack_from("<i", payload, p)[0]
+    p += 4 + n                                  # + sub-path string
+    p += 4                                      # [4] VirtualTexture (object ref)
+    body = payload[r.p: p] + payload[p + 8:]    # skip [12] and [13] (4 bytes each)
+    return _hdr_for([x for x in h if x not in (12, 13)]) + body, True
 
 
 def verify_wp(utoc: str, ws: WPSource, new_pkgs: dict, payloads: dict, rules) -> list[str]:
