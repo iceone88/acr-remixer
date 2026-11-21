@@ -38,7 +38,7 @@ from .cityhash import name_hash
 from .iostore_write import ChunkIn, container_header_chunk_id, retarget_container_header, write_container
 from .level import decode_components, learn_rules, patched_payload
 from .mesh_clip import clip_mesh_payload, mesh_export_index
-from .wp_hash import all_cells_in_top_level
+from .wp_hash import all_cells_in_top_level, widen_cell_data
 from .zen_write import rewrite_package
 
 SPLINES = ("CenterSpline", "IdealSpline", "LeftBorderSpline", "RightBorderSpline", "ContourSpline")
@@ -284,6 +284,18 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     payloads[ws.main][hi_] = nb
     rep.checks.append(f"streaming: all {hst['cells']} cells registered in grid level {hst['level']} "
                       f"(was {hst['before']})")
+    # ... and make every cell's own record (position/extent/content bounds/level)
+    # cover the world, so bounds tests against the player pass too
+    widened = skipped = 0
+    for i, e in enumerate(main.exports):
+        if e.name.startswith("WorldPartitionRuntimeCellDataSpatialHash"):
+            nbp = widen_cell_data(main.export_bytes(e), hst["level"])
+            if nbp is None:
+                skipped += 1
+            else:
+                payloads[ws.main][i] = nbp
+                widened += 1
+    rep.checks.append(f"streaming: {widened} cell records widened to world bounds ({skipped} unrecognised)")
     rep.checks.append(f"streaming grid: cell {cell_size / 100:.0f} m, loading range {rng / 100:.0f} m -> "
                       f"{cfg.loading_range_cm / 100:.0f} m")
 
@@ -439,7 +451,8 @@ def verify_wp(utoc: str, ws: WPSource, new_pkgs: dict, payloads: dict, rules) ->
         pk = Package(c.read(path))
         comps = {cc.export for cc in decode_components(pk, rules)}
         want = [i for i in pl if pk.exports[i].name not in SPLINES
-                and not pk.exports[i].name.startswith("WorldPartitionRuntimeSpatialHash")]
+                and not pk.exports[i].name.startswith(("WorldPartitionRuntimeSpatialHash",
+                                                       "WorldPartitionRuntimeCellData"))]
         n_patched += len(want)
         bad += sum(i not in comps for i in want)
     out.append(f"level: {n_patched} patched components in {len(payloads)} packages, {bad} fail to re-decode")

@@ -92,6 +92,30 @@ def read_grid(payload: bytes):
     raise ValueError("grid has no GridLevels")
 
 
+# WorldPartitionRuntimeCellDataSpatialHash: [0] Position FVector, [1] Extent f32,
+# [2] ContentBounds FBox (2 x FVector + bIsValid), [4] GridName FName,
+# [6] HierarchicalLevel i32; then native data (u32 + FString debug name).
+CELLDATA_SIZES = {0: 24, 1: 4, 2: 49, 4: 8, 6: 4}
+
+
+def widen_cell_data(payload: bytes, level: int, half: float = 1.0e7) -> bytes | None:
+    """Make a cell record cover the whole world as a top-level cell, so no
+    bounds test rejects it wherever its actors now are. None if the layout is
+    not the one documented above."""
+    r = Reader(payload, 0)
+    h = r.header()
+    if not set(h) <= set(CELLDATA_SIZES) or 4 not in h:
+        return None
+    vals = {}
+    for f in h:
+        vals[f] = payload[r.p: r.p + CELLDATA_SIZES[f]]
+        r.p += CELLDATA_SIZES[f]
+    tail = payload[r.p:]
+    box = struct.pack("<6d", -half, -half, -half / 10, half, half, half / 10) + b"\x01"
+    out = _hdr_for([1, 2, 4, 6]) + struct.pack("<f", half) + box + vals[4] + struct.pack("<i", level)
+    return out + tail
+
+
 def all_cells_in_top_level(payload: bytes) -> tuple[bytes, dict]:
     levels, a, b, _ = read_grid(payload)
     refs = []
