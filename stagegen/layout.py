@@ -1,4 +1,4 @@
-"""Turn a search result into a flat layout: one centreline, one pacenote list,
+﻿"""Turn a search result into a flat layout: one centreline, one pacenote list,
 and a manifest of exactly which source slices/transforms were used. The
 manifest is what a future in-game build step consumes."""
 from __future__ import annotations
@@ -41,7 +41,7 @@ def build_layout(state: State, step: float) -> Layout:
         w = p.widths if i == 0 else p.widths[1:]
         plen = float(arclength(p.points)[-1])
         if p.kind == "segment" and p.pacenotes:
-            notes += [Pacenote(n.s + s, n.text, "original") for n in p.pacenotes]
+            notes += [Pacenote(n.s + s, n.text, "original", n.length) for n in p.pacenotes]
         else:
             # connectors and reversed segments: generate from geometry.
             notes += [Pacenote(n.s + s, n.text, "generated") for n in generate(p.points, step)]

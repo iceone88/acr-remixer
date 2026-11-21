@@ -1,4 +1,4 @@
-"""Core data types: source stages, cut segments, end states, placed pieces."""
+﻿"""Core data types: source stages, cut segments, end states, placed pieces."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,6 +11,7 @@ class Pacenote:
     s: float          # distance along the piece/stage where the call is triggered (m)
     text: str         # e.g. "4 left long", "crest", "into 2 right"
     origin: str = "original"   # "original" (carried over) or "generated"
+    length: float = 30.0       # extent of the call (m), as stored in DT_Pacenote tables
 
 
 @dataclass
@@ -64,7 +65,7 @@ class Segment:
         if reversed_:
             return None
         s0, s1 = self.s0, self.s0 + self.length
-        return [Pacenote(n.s - s0, n.text, "original")
+        return [Pacenote(n.s - s0, n.text, "original", n.length)
                 for n in self.stage.pacenotes if s0 <= n.s < s1]
 
 
