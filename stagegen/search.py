@@ -1,4 +1,4 @@
-"""Beam search that chains segments (via connectors) into a new stage layout."""
+﻿"""Beam search that chains segments (via connectors) into a new stage layout."""
 from __future__ import annotations
 
 import random
@@ -15,7 +15,7 @@ from .segments import end_states
 @dataclass
 class SearchConfig:
     target_length: float = 10_000.0
-    length_tolerance: float = 0.08      # finish within ±8 %
+    length_tolerance: float = 0.08      # finish within Â±8 %
     beam_width: int = 48
     branch_per_state: int = 24          # best expansions kept per parent
     yaw_offsets_deg: tuple = (-25, -12, 0, 12, 25)
@@ -30,6 +30,9 @@ class SearchConfig:
     variety: float = 12.0               # random per-segment preference; bigger = more seed-to-seed variation
     step: float = 2.0
     coarse_step: float = 10.0            # spacing used for overlap tests
+    start_segment: str | None = None     # force this segment (forwards) as the opening piece
+    end_segment: str | None = None       # force this segment (forwards) as the closing piece
+    novelty: float = 0.0                 # penalty for re-using the source order (seg k+1 straight after seg k, both forwards)
 
 
 @dataclass
@@ -101,7 +104,9 @@ def _initial_states(segments: list[Segment], cfg: SearchConfig) -> list[State]:
     out = []
     origin = EndState(np.zeros(3), 0.0, 0.0, 0.0)
     for seg in segments:
-        for rev in ((False, True) if cfg.allow_reversed else (False,)):
+        if cfg.start_segment and seg.id != cfg.start_segment:
+            continue
+        for rev in ((False, True) if cfg.allow_reversed and not cfg.start_segment else (False,)):
             s0, e0 = end_states(seg, rev, cfg.step)
             pts, yaw, trans = _place(seg, rev, s0, EndState(np.zeros(3), 0.0, s0.grade, s0.width), cfg)
             _, e = end_states(seg, rev, cfg.step)
@@ -126,7 +131,8 @@ def _expand(st: State, segments: list[Segment], cfg: SearchConfig, rng: random.R
             continue
         if cfg.same_surface_only and seg.stage.surface != st.surface:
             continue
-        for rev in ((False, True) if cfg.allow_reversed else (False,)):
+        is_end = seg.id == cfg.end_segment
+        for rev in ((False, True) if cfg.allow_reversed and not is_end else (False,)):
             s0, e0 = end_states(seg, rev, cfg.step)
             dg = abs(s0.grade - st.end.grade)
             dw = abs(s0.width - st.end.width)
@@ -154,6 +160,7 @@ def _expand(st: State, segments: list[Segment], cfg: SearchConfig, rng: random.R
                            + 6 * abs(off) / 25
                            + 4 * dw
                            + (3 if seg.stage.name == st.last_stage else 0)
+                           + (cfg.novelty if _follows_source(st, seg, rev) else 0)
                            + bias[seg.id])
                 kids.append(State(
                     st,
@@ -166,6 +173,15 @@ def _expand(st: State, segments: list[Segment], cfg: SearchConfig, rng: random.R
     rng.shuffle(kids)  # tie-break randomly so different seeds give different stages
     kids.sort(key=_score)
     return kids[: cfg.branch_per_state]
+
+
+def _follows_source(st: State, seg: Segment, rev: bool) -> bool:
+    last = st.pieces[-1]
+    if rev or last.reversed or last.segment_id is None:
+        return False
+    a, _, ka = last.segment_id.rpartition("#")
+    b, _, kb = seg.id.rpartition("#")
+    return a == b and ka.isdigit() and kb.isdigit() and int(kb) == int(ka) + 1
 
 
 def _score(s: State) -> float:
@@ -190,8 +206,16 @@ def search(segments: list[Segment], cfg: SearchConfig) -> State | None:
         if not beam:
             break
         nxt: list[State] = []
+        end_len = next((s.length for s in segments if s.id == cfg.end_segment), 0.0)
         for st in beam:
             for kid in _expand(st, segments, cfg, rng, bias):
+                if cfg.end_segment:
+                    if kid.pieces[-1].segment_id == cfg.end_segment:
+                        if lo <= kid.length <= hi:
+                            finished.append(kid)
+                    elif kid.length + end_len + 40 < hi:
+                        nxt.append(kid)
+                    continue
                 if lo <= kid.length <= hi:
                     finished.append(kid)
                 elif kid.length < lo:

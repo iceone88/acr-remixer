@@ -1,4 +1,4 @@
-"""Cut source stages into reusable segments at 'quiet' points of the road.
+﻿"""Cut source stages into reusable segments at 'quiet' points of the road.
 
 A good cut point is somewhere a seam will be least noticeable and easiest to
 blend: low horizontal curvature, roughly constant grade, and steady width.
@@ -21,6 +21,7 @@ class CutConfig:
     window_m: float = 30.0           # half-window that has to be quiet
     min_len: float = 250.0
     max_len: float = 1200.0
+    anchor_ends: bool = False        # first segment starts at the stage start, last ends at the finish
 
 
 def cut_candidates(stage: SourceStage, cfg: CutConfig) -> np.ndarray:
@@ -47,6 +48,16 @@ def cut_stage(stage: SourceStage, cfg: CutConfig) -> list[Segment]:
     lo, hi = int(cfg.min_len / cfg.step), int(cfg.max_len / cfg.step)
     segs: list[Segment] = []
     i = cand[0]
+    if cfg.anchor_ends:
+        # The opening segment must contain the real start (gates, start area),
+        # even if the first quiet point is further than max_len away.
+        first = cand[(cand >= lo) & (cand <= hi)]
+        if len(first) == 0:
+            first = cand[cand >= lo][:1]
+        if len(first):
+            j = int(first[-1])
+            segs.append(Segment(f"{stage.name}#0", stage, 0, j, cfg.step))
+            i = j
     while True:
         nxt = cand[(cand >= i + lo) & (cand <= i + hi)]
         if len(nxt) == 0:
@@ -58,6 +69,13 @@ def cut_stage(stage: SourceStage, cfg: CutConfig) -> list[Segment]:
         j = int(nxt[-1])
         segs.append(Segment(f"{stage.name}#{len(segs)}", stage, int(i), j, cfg.step))
         i = j
+    n = len(stage.points) - 1
+    if cfg.anchor_ends and segs and segs[-1].i1 != n:
+        last = segs[-1]
+        if (n - last.i1) * cfg.step < cfg.min_len or segs[-1].i1 != i:
+            segs[-1] = Segment(last.id, stage, last.i0, n, cfg.step)      # stretch to the finish
+        else:
+            segs.append(Segment(f"{stage.name}#{len(segs)}", stage, last.i1, n, cfg.step))
     return segs
 
 
