@@ -145,7 +145,8 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     # coarse backdrop terrain (SM_<Level>TerrainYYXX); it follows the piece
     # that owns most of them, clipped to those stretches.
     bpk = Package(fs.read(ws.baked))
-    meshes, head, tb, tp, ts = W.read_baked_raw(bpk)
+    bf = W.read_baked_full(bpk)
+    meshes = bf.meshes
     tile_v = np.vstack([m.vertices[::4, [0, 2, 1]] for m in meshes
                         if re.search(rb"Track\d{4}", m.soft_sub) and len(m.vertices)])
     dcov, _ = cKDTree(tile_v[:, :2]).query(src.points[:, :2])
@@ -345,10 +346,10 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             pc = pieces[int(kk)]
             V = (U[used] @ pc.R.T + pc.t)[:, [0, 2, 1]]
             out_meshes.append(W.MeshOut(V, inv.ravel().astype(np.uint32), m.material_ref, m.soft_pkg,
-                                        m.soft_asset, m.soft_sub, m.extra))
+                                        m.soft_asset, m.soft_sub, m.extra, m.group))
             rep.baked_tris += len(sel)
     rep.baked_meshes = len(out_meshes)
-    new_pkgs[ws.baked] = rewrite_package(bpk, {0: W.baked_payload(head, tb, out_meshes, tp, ts)})
+    new_pkgs[ws.baked] = rewrite_package(bpk, {0: W.baked_payload_full(bf, out_meshes)})
 
     # ---- pacenotes
     for key, path in ws.tables.items():
@@ -405,8 +406,9 @@ def verify_wp(utoc: str, ws: WPSource, new_pkgs: dict, payloads: dict, rules) ->
             continue
         sp = level_splines(Package(c.read(path)))
         out.append(f"route {kind}: " + ", ".join(f"{k}={float(arclength(v)[-1]):.0f}m" for k, v in sp.items()))
-    meshes = read_baked(Package(c.read(ws.baked)))
-    out.append(f"baked: {len(meshes)} meshes, indices in range: "
+    bpk = Package(c.read(ws.baked))
+    meshes = read_baked(bpk)
+    out.append(f"baked: {W.check_baked(bpk)}; triangle indices in range: "
                f"{all((m.indices.max() < len(m.vertices)) if len(m.indices) else True for m in meshes)}")
     for key, path in ws.tables.items():
         out.append(f"pacenotes {key}: {len(read_pacenote_table(Package(c.read(path))))} rows")

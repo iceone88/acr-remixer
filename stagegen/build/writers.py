@@ -101,6 +101,7 @@ class MeshOut:
     soft_asset: tuple[int, int]
     soft_sub: bytes            # raw length-prefixed string bytes
     extra: np.ndarray          # the 4 trailing floats
+    group: int = 8             # collision group key (base-game index lists)
 
 
 def read_baked_raw(pk: Package):
@@ -168,6 +169,179 @@ def baked_payload(head: bytes, transform_bytes: bytes, meshes: list[MeshOut],
     for i in range(len(meshes)):
         out += (b"\x80\x05\x01" + struct.pack("<i", 1)) if i == 0 else (b"\x00\x05" + struct.pack("<ii", i, 1))
     out += tail_suffix
+    return bytes(out)
+
+
+# ------------------------------------------------- baked data, full container
+# Base-game BakedDataContainer (top fields 0-3):
+#   0 meshes                     TArray<FBakedMesh>
+#   1 shape entries              TArray<{TArray<Box>, TArray<Sphere>, TArray<Capsule>, i32 material, SoftPath}>
+#   2 (empty array in every level seen)
+#   3 index lists                3 x TArray<{i32 key, i32 0, u16 hdr, TSet<{start,count}>}> + u32 0
+#     list 0 groups mesh indices, list 2 shape-entry indices, by collision key.
+SHAPE_SCHEMAS = {
+    0: {0: 24, 1: 24, 2: 4, 3: 4, 4: 4, 5: 4, 6: 8, 7: 1, 8: 1, 9: 1},   # box
+    1: {0: 24, 1: 4, 2: 4, 3: 8, 4: 1, 5: 1, 6: 1},                      # sphere
+    2: {0: 24, 1: 24, 2: 4, 3: 4, 4: 4, 5: 8, 6: 1, 7: 1, 8: 1},         # capsule
+}
+
+
+@dataclass
+class BakedFull:
+    top: bytes                 # top-level unversioned header bytes
+    transform_bytes: bytes
+    meshes: list               # MeshOut with .group set
+    mid: bytes                 # fields 1 and 2, verbatim
+    list0_hdr: list            # [(key, z1, hdr2)] in original order
+    rest: bytes                # lists 1, 2 and trailer, verbatim
+    covered: set = None        # mesh indices that list 0 references
+
+
+def _skip_shapes(r: Reader):
+    n = r.u32()
+    for _ in range(n):
+        for f in r.header():
+            if f == 3:
+                r.i32()
+            elif f in (0, 1, 2):
+                sch = SHAPE_SCHEMAS[f]
+                for _ in range(r.u32()):
+                    for g in r.header():
+                        if g not in sch:
+                            raise ValueError(f"unknown collision shape field {f}.{g}")
+                        r.p += sch[g]
+            elif f == 4:
+                r.p += 16
+                n_ = r.i32(); r.p += n_
+            else:
+                raise ValueError(f"unknown shape entry field {f}")
+
+
+def _read_list(r: Reader):
+    groups = []
+    for _ in range(r.i32()):
+        key, z1 = r.i32(), r.i32()
+        hdr = r.raw(2)
+        rem, n = r.i32(), r.i32()
+        if rem != 0:
+            raise ValueError("TSet with removed elements")
+        ranges = []
+        for _ in range(n):
+            v = {0: 0, 1: 0}
+            for f in r.header():
+                v[f] = r.i32()
+            ranges.append((v[0], v[1]))
+        groups.append((key, z1, hdr, ranges))
+    return groups
+
+
+def read_baked_full(pk: Package) -> BakedFull:
+    e = pk.exports[0]
+    d = pk.d
+    end = e.data_offset + e.serial_size
+    r = Reader(d, e.data_offset)
+    top_fields = r.header()
+    top = d[e.data_offset: r.p]
+    if top_fields != [0, 1, 2, 3]:
+        raise ValueError(f"unexpected BakedDataContainer layout {top_fields}")
+    meshes, head, transform_bytes, _, _ = read_baked_raw(pk)
+    # position after the meshes: re-walk them
+    r.u32()
+    for _ in range(len(meshes)):
+        for f in r.header():
+            if f == 0:
+                B._transform(r)
+            elif f == 1:
+                B._array(r, np.float32, 3)
+            elif f == 2:
+                B._array(r, np.float32)
+            elif f == 3:
+                B._array(r, np.uint32)
+            elif f == 4:
+                r.i32()
+            elif f == 5:
+                r.p += 16
+                n_ = r.i32(); r.p += n_
+    mid0 = r.p
+    _skip_shapes(r)
+    if r.u32() != 0:
+        raise ValueError("BakedDataContainer field 2 is not empty")
+    mid = d[mid0: r.p]
+    l0 = _read_list(r)
+    rest = d[r.p: end]
+    key_of = {}
+    for key, _, _, ranges in l0:
+        for a, b in ranges:
+            for i in range(a, a + b):
+                key_of.setdefault(i, key)
+    for i, m in enumerate(meshes):
+        m.group = key_of.get(i, l0[0][0] if l0 else 8)
+    return BakedFull(top, transform_bytes, meshes, mid, [(k, z, h) for k, z, h, _ in l0], rest, set(key_of))
+
+
+def check_baked(pk: Package) -> str:
+    """Parse every field strictly and require the parse to end exactly at the
+    export's end (the engine asserts on any size mismatch)."""
+    bf = read_baked_full(pk)
+    r = Reader(bf.rest, 0)
+    l1 = _read_list(r)
+    l2 = _read_list(r)
+    if r.p != len(bf.rest) - 4 or bf.rest[-4:] != bytes(4):
+        raise ValueError(f"index lists end at {r.p}, expected {len(bf.rest) - 4}")
+    n = len(bf.meshes)
+    if bf.covered != set(range(n)):
+        raise ValueError(f"mesh index list covers {len(bf.covered)} indices, {n} meshes")
+    return f"{n} meshes all grouped {[k for k, _, _ in bf.list0_hdr]}, lists {len(l1)}/{len(l2)}, exact size"
+
+
+def _runs(idx: list[int]) -> list[tuple[int, int]]:
+    out = []
+    for i in sorted(idx):
+        if out and out[-1][0] + out[-1][1] == i:
+            out[-1] = (out[-1][0], out[-1][1] + 1)
+        else:
+            out.append((i, 1))
+    return out
+
+
+def baked_payload_full(bf: BakedFull, meshes: list[MeshOut]) -> bytes:
+    out = bytearray(bf.top)
+    out += struct.pack("<I", len(meshes))
+    for m in meshes:
+        out += _hdr(6)
+        out += bf.transform_bytes
+        v = np.ascontiguousarray(m.vertices, dtype=np.float32).ravel()
+        out += struct.pack("<I", len(v)) + v.tobytes()
+        ex = np.ascontiguousarray(m.extra, dtype=np.float32)
+        out += struct.pack("<I", len(ex)) + ex.tobytes()
+        ix = np.ascontiguousarray(m.indices, dtype=np.uint32).ravel()
+        out += struct.pack("<I", ix.size) + ix.tobytes()
+        out += struct.pack("<i", m.material_ref)
+        out += struct.pack("<II", *m.soft_pkg) + struct.pack("<II", *m.soft_asset) + m.soft_sub
+    out += bf.mid
+    # one range per run of consecutive meshes from the same actor (one body each)
+    by_key: dict[int, list[tuple[int, int]]] = {}
+    i = 0
+    while i < len(meshes):
+        j = i
+        while j + 1 < len(meshes) and meshes[j + 1].group == meshes[i].group \
+                and meshes[j + 1].soft_sub == meshes[i].soft_sub:
+            j += 1
+        by_key.setdefault(meshes[i].group, []).append((i, j - i + 1))
+        i = j + 1
+    groups = [(k, z, h) for k, z, h in bf.list0_hdr if k in by_key]
+    known = {k for k, _, _ in groups}
+    groups += [(k, 0, b"\x00\x03") for k in by_key if k not in known]
+    out += struct.pack("<i", len(groups))
+    for k, z, h in groups:
+        runs = by_key[k]
+        out += struct.pack("<ii", k, z) + h + struct.pack("<ii", 0, len(runs))
+        for a, b in runs:
+            if a == 0:
+                out += b"\x80\x05\x01" + struct.pack("<i", b)        # start is zero: masked out
+            else:
+                out += b"\x00\x05" + struct.pack("<ii", a, b)
+    out += bf.rest
     return bytes(out)
 
 
