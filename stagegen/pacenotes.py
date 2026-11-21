@@ -40,18 +40,21 @@ def generate(points: np.ndarray, step: float) -> list[Pacenote]:
             j += 1
         if (j - i) * step >= 8:   # ignore tiny wiggles
             kmax = np.abs(k[i : j + 1]).max()
-            side = "left" if k[i] > 0 else "right"
+            # Game pacenote tokens (DT_Pacenote* vocabulary): Left3, RightHP, Long ...
+            side = "Left" if k[i] > 0 else "Right"
             call = _call(1 / kmax)
-            text = f"{side} hairpin" if call == "hairpin" else f"{call} {side}"
-            if (j - i) * step > 80:
-                text += " long"
+            text = f"{side}HP" if call == "hairpin" else f"{side}{call}"
+            if (j - i) * step > 160:
+                text += " VeryLong"
+            elif (j - i) * step > 80:
+                text += " Long"
             notes.append((i * step, j * step, text))
         i = j + 1
 
     out: list[Pacenote] = []
     for idx, (s0, s1, text) in enumerate(notes):
         if idx and s0 - notes[idx - 1][1] < 30:
-            text = "into " + text
+            text = "Into " + text
         out.append(Pacenote(max(0.0, s0 - CUE_LEAD), text, "generated"))
 
     # Crests: strongly negative vertical curvature (grade dropping fast).
@@ -64,7 +67,7 @@ def generate(points: np.ndarray, step: float) -> list[Pacenote]:
             while j + 1 < n and crest[j + 1]:
                 j += 1
             mid = (i + j) // 2
-            out.append(Pacenote(max(0.0, mid * step - CUE_LEAD), "crest", "generated"))
+            out.append(Pacenote(max(0.0, mid * step - CUE_LEAD), "Crest", "generated"))
             i = j + 1
         else:
             i += 1
