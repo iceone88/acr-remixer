@@ -131,12 +131,17 @@ def decode_components(pk: Package, rules: dict | None = None) -> list[Comp]:
         if not ({L, L + 1, L + 2} & set(h)):
             continue
         after = [x for x in h if x > L + 2]
-        if any(x not in rule.extras for x in after):
+        front_ok = not any(x < L for x in h)
+        if any(x not in rule.extras for x in after) and not front_ok:
             continue
         end = e.data_offset + e.serial_size
         n_trip = sum(x in h for x in (L, L + 1, L + 2))
         cands = []
-        if d[end - rule.trailer: end] == TAILS.get(L, bytes(8)):
+        if not any(x < L for x in h):
+            # values are serialised in index order: with nothing before L the
+            # transform block starts right after the header, whatever follows
+            cands.append(r.p + 24 * n_trip)
+        if d[end - rule.trailer: end] == TAILS.get(L, bytes(8)) and all(x in rule.extras for x in after):
             cands.append(end - rule.trailer - sum(rule.extras[x] for x in after))
         if L == 163 and not after:
             # StaticMeshComponent with native LODData (painted vertex colours):

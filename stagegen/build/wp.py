@@ -204,6 +204,13 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             if owner.startswith(SKIP_OWNERS) or any(w in owner for w in SKIP_WORDS):
                 continue
             kind = owner.split("_UAID")[0].rstrip("0123456789_")
+            if "PlayerStart" in owner:
+                # where the car is spawned (sits behind the start line, often
+                # far from the route spline): always with the opening piece
+                loc, rot = rigid(0, p_m, c.rot)
+                payloads[path][c.export] = patched_payload(pk, c, loc * 100, rot)
+                rep.moved[kind] += 1
+                continue
             k, d, s, idx = (v[0] for v in assign(p_m[None]))
             if route == "cut":
                 continue
