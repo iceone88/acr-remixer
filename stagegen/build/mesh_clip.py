@@ -34,7 +34,10 @@ def find_lods(b: bytes) -> list[Lod]:
         if i < 0 or i + 16 > len(b):
             break
         st, n, es, n2 = struct.unpack_from("<IIII", b, i)
-        if st == 12 and es == 12 and n == n2 and 3 <= n < 20_000_000 and i + 16 + 12 * n <= len(b):
+        # LODs shrink but never below a few dozen vertices; tiny matches are
+        # coincidences inside tangent/UV data
+        if st == 12 and es == 12 and n == n2 and (3 if not pos else 24) <= n < 20_000_000 \
+                and i + 16 + 12 * n <= len(b) and (not pos or n <= pos[-1][1]):
             pos.append((i + 16, n))
             i += 16 + 12 * n
             continue
@@ -67,7 +70,10 @@ def clip_mesh_payload(b: bytes, keep_fn) -> tuple[bytes, dict]:
     """keep_fn(centroids_cm (T,3) in mesh-local space) -> bool mask (T,)."""
     out = bytearray(b)
     stats = {"lods": 0, "tris": 0, "dropped": 0, "bufs": 0}
-    for lod in find_lods(b):
+    lods = find_lods(b)
+    if not lods or any(len(l.index_bufs) == 0 for l in lods):
+        raise ValueError(f"mesh layout not understood: LODs {[(l.n, len(l.index_bufs)) for l in lods]}")
+    for lod in lods:
         P = np.frombuffer(b, "<f4", 3 * lod.n, lod.pos_off).reshape(-1, 3).astype(np.float64)
         stats["lods"] += 1
         for off, cnt, w in lod.index_bufs:
