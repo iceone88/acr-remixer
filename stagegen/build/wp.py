@@ -38,6 +38,7 @@ from .cityhash import name_hash
 from .iostore_write import ChunkIn, container_header_chunk_id, retarget_container_header, write_container
 from .level import decode_components, learn_rules, patched_payload
 from .mesh_clip import clip_mesh_payload, mesh_export_index
+from .wp_hash import all_cells_in_top_level
 from .zen_write import rewrite_package
 
 SPLINES = ("CenterSpline", "IdealSpline", "LeftBorderSpline", "RightBorderSpline", "ContourSpline")
@@ -277,7 +278,12 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     if not (1000 <= cell_size <= 10_000_000 and 1000 <= rng <= 10_000_000):
         raise ValueError(f"unexpected streaming grid layout (cell {cell_size}, range {rng})")
     struct.pack_into("<f", b, 24, cfg.loading_range_cm)
-    payloads[ws.main][hi_] = bytes(b)
+    # cells are looked up by grid coordinate, i.e. where their actors used to
+    # be: register them all in the top-level cell that holds the route cells
+    nb, hst = all_cells_in_top_level(bytes(b))
+    payloads[ws.main][hi_] = nb
+    rep.checks.append(f"streaming: all {hst['cells']} cells registered in grid level {hst['level']} "
+                      f"(was {hst['before']})")
     rep.checks.append(f"streaming grid: cell {cell_size / 100:.0f} m, loading range {rng / 100:.0f} m -> "
                       f"{cfg.loading_range_cm / 100:.0f} m")
 
