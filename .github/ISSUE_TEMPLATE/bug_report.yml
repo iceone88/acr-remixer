@@ -40,7 +40,14 @@ body:
     id: where_on_stage
     attributes:
       label: Where on the stage? (if it's in the game)
-      description: Roughly how far from the start, and screenshots if you have them (Steam screenshots work great).
+      description: Roughly how far from the start (the timer or the distance in the HUD helps).
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: |
+        Ideally a screenshot of the problem: drag images here. Steam screenshots (F12 in the game) work great,
+        and a screenshot of the ACR Remixer window (map + log) helps for build problems.
   - type: textarea
     id: report
     attributes:
