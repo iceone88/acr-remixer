@@ -77,6 +77,10 @@ class WPConfig:
     display_name: str | None = None       # menu name of an own-level stage
     build_params: dict | None = None      # how it was built (stored with it: regenerate / load settings)
     join_shears: list | None = None       # per piece: join smoothing shears in the layout frame (from the search)
+    # barrier tapes hang between two poles; poles of different pieces (or a
+    # parked one) stretch them across the map. "hide": park every tape pole
+    # (the tapes go with them); "move": move poles like props (stretches)
+    tapes: str = "hide"
     debug_dup_cells: tuple = ()           # test builds (own level): duplicate these cells (source IDs), unmoved
     debug_dup_grid: bool = True           # test builds: register the duplicates in the streaming grid
     debug_dup_same_pkg: bool = False      # test builds: duplicates stream the source cell package (no copy)
@@ -744,6 +748,14 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 rep.moved[kind if layer == 0 else f"{kind} (copies)"] += 1
         for c in comps:
             own_ = ex[c.owner].name if c.owner < len(ex) else ""
+            if cfg.tapes == "hide" and own_.startswith(("TapePoleActor", "BC_TapeHandleActor")):
+                p_m = c.loc / 100
+                payl[c.export] = patched_payload(pk, c, (p_m - np.array([0, 0, PARK_M])) * 100,
+                                                 c.rot if c.rot is not None else np.zeros(3))
+                touched.add(c.export)
+                if layer == 0:
+                    rep.moved["tape poles hidden (with their tapes)"] += 1
+                continue
             if layer and (c.export in giant or bd_re.match(own_) or c.rule.L == 26 or "PlayerStart" in own_):
                 continue                                   # exists once (layer 0); parked below
             if c.export in giant and not (bd_re.match(own_) or tile_re.match(own_)):   # tiles: own handling

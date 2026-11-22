@@ -166,8 +166,9 @@ def decode_components(pk: Package, rules: dict | None = None) -> list[Comp]:
             if L + 2 in h:
                 sc = np.array(struct.unpack_from("<3d", d, p)); p += 24
             # unversioned properties are only written when they differ from the default
+            # (exactly: a scale of 0.99999998 is stored, e.g. on scaled tape poles)
             if (loc is not None and not loc.any()) or (rot is not None and not rot.any()) or \
-                    (sc is not None and np.allclose(sc, 1.0)):
+                    (sc is not None and np.all(sc == 1.0)):
                 continue
             if not _sane(loc, rot, sc):
                 continue
