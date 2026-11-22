@@ -272,7 +272,9 @@ def smooth_layout_points(best: TState, cfg: TileSearchConfig) -> tuple[list[list
     return shears, smoothed
 
 
-def _place(rng: Range, rev: bool, cuts: list[Cut], st: TState, cfg: TileSearchConfig):
+def _place(rng: Range, rev: bool, cuts: list[Cut], st: TState, cfg: TileSearchConfig, smooth: bool = False):
+    """smooth: allow kinks up to smooth_kink_deg (given sequences; the search
+    keeps max_kink_deg: wider limits only fill its beam with poorer joins)."""
     ent = cuts[rng.b] if rev else cuts[rng.a]
     ext = cuts[rng.a] if rev else cuts[rng.b]
     h_in = ent.heading + (np.pi if rev else 0.0)
@@ -283,7 +285,7 @@ def _place(rng: Range, rev: bool, cuts: list[Cut], st: TState, cfg: TileSearchCo
         if best is None or abs(kink) < abs(best[1]):
             best = (yaw, kink)
     yaw, kink = best
-    if abs(np.degrees(kink)) > max(cfg.max_kink_deg, cfg.smooth_kink_deg):
+    if abs(np.degrees(kink)) > (max(cfg.max_kink_deg, cfg.smooth_kink_deg) if smooth else cfg.max_kink_deg):
         return None
     R = rot_z(yaw)
     trans = st.exit_p - R @ ent.p
@@ -371,7 +373,7 @@ def sequence_state(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg
                              f"(raise max uses)")
         if b == last and layer != 0:
             raise ValueError("sequence: the finish piece's tiles are already used (it must be their first use)")
-        placed = _place(r, rev, cuts, st, cfg)
+        placed = _place(r, rev, cuts, st, cfg, smooth=True)
         if placed is None:
             # _place refuses kinks over the limit: place anyway, warn
             loose = TileSearchConfig(**{**cfg.__dict__, "max_kink_deg": 180.0})
@@ -459,7 +461,7 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
                     if placed is None:
                         continue
                     pts, yaw, trans, kink, g_in, ent, ext = placed
-                    if abs(g_in - st.exit_grade) > max(cfg.max_grade_mismatch, cfg.smooth_grade):
+                    if abs(g_in - st.exit_grade) > cfg.max_grade_mismatch:
                         continue
                     if abs(ent.width - st.exit_width) > cfg.max_width_mismatch:
                         continue
