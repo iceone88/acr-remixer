@@ -146,6 +146,23 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         end = (np.asarray(s) <= 50) | (np.asarray(s) >= L_src - 50)
         return np.asarray(d) <= np.where(end, max(base, cfg.end_radius), base)
 
+    # Voronoi ownership on the *new* layout: after moving, a triangle/prop of
+    # piece j is kept only if j's road is (about) the nearest road to it, so
+    # no piece reaches over another piece's road.
+    piece_new = []
+    for pc in pieces:
+        i0, i1 = int(pc.sa / step), min(int(np.ceil(pc.sb / step)), len(src.points) - 1)
+        piece_new.append(src.points[i0: i1 + 1, :2] @ pc.R[:2, :2].T + pc.t[:2])
+    tree_new_all = cKDTree(np.vstack(piece_new))
+    tree_new = [cKDTree(p) for p in piece_new]
+
+    def owns(j, src_pts_m, margin: float = 2.0):
+        pc = pieces[j]
+        q = np.atleast_2d(src_pts_m)[:, :2] @ pc.R[:2, :2].T + pc.t[:2]
+        d_own, _ = tree_new[j].query(q)
+        d_all, _ = tree_new_all.query(q)
+        return d_own <= d_all + margin
+
     def rigid(j, p_m, rot):
         pc = pieces[j]
         return pc.R @ p_m + pc.t, (rot if rot is not None else np.zeros(3)) + np.array([0, np.degrees(pc.yaw), 0])
@@ -261,7 +278,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                     rep.relocated.append((f"{route}:{kind}", round(s), round(s_new)))
                 payloads[path][c.export] = patched_payload(pk, c, loc * 100, rot)
                 continue
-            if k >= 0 and lat_ok(s, d, cfg.prop_lateral):
+            if k >= 0 and lat_ok(s, d, cfg.prop_lateral) and owns(k, p_m[None])[0]:
                 loc, rot = rigid(k, p_m, c.rot)
                 payloads[path][c.export] = patched_payload(pk, c, loc * 100, rot)
                 rep.moved[kind] += 1
@@ -342,10 +359,11 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         j = tile_piece[key]
         pc = pieces[j]
 
-        def keep(cen_cm, pc=pc):
+        def keep(cen_cm, pc=pc, j=j):
             d, idx = assign.tree.query(cen_cm[:, :2] / 100)
             s = idx * step
-            return (s >= pc.sa - cfg.range_ext) & (s <= pc.sb + cfg.range_ext) & lat_ok(s, d, cfg.terrain_clip)
+            return ((s >= pc.sa - cfg.range_ext) & (s <= pc.sb + cfg.range_ext) & lat_ok(s, d, cfg.terrain_clip)
+                    & owns(j, cen_cm / 100))
         nbm, hs = transform_mesh(mb, pc.R, pc.t * 100, None if cfg.debug_no_clip else keep)
         payloads[ws.main][i] = nbm
         moved_hlod += 1
@@ -363,7 +381,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             w = (cen_cm + pivot_cm) / 100
             d, idx = assign.tree.query(w[:, :2])
             s = idx * step
-            return (s >= pc.sa - cfg.range_ext) & (s <= pc.sb + cfg.range_ext) & lat_ok(s, d, lim)
+            return (s >= pc.sa - cfg.range_ext) & (s <= pc.sb + cfg.range_ext) & lat_ok(s, d, lim) & owns(j, w)
         return keep
 
     gen_dir = f"/{lvl}/GeneratedSplits/"
@@ -384,7 +402,8 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         pc = pieces[bd_piece]
         d, idx = assign.tree.query(w_m[:, :2])
         s = idx * step
-        return unc_ext[idx] & (s >= pc.sa - 40) & (s <= pc.sb + 40) & lat_ok(s, d, cfg.terrain_clip)
+        return (unc_ext[idx] & (s >= pc.sa - 40) & (s <= pc.sb + 40) & lat_ok(s, d, cfg.terrain_clip)
+                & owns(bd_piece, w_m))
 
     if bd_piece is not None and not cfg.debug_no_clip:
         for name, pivot in bd_pivot.items():
@@ -418,7 +437,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             d, idx = assign.tree.query(cen[:, :2])
             s = idx * step
             lim = cfg.road_clip if b"Road" in m.soft_sub else cfg.terrain_clip
-            keep = (s >= pc.sa - cfg.range_ext) & (s <= pc.sb + cfg.range_ext) & lat_ok(s, d, lim)
+            keep = (s >= pc.sa - cfg.range_ext) & (s <= pc.sb + cfg.range_ext) & lat_ok(s, d, lim) & owns(j, cen)
             k = np.where(keep, j, -1)
         elif re.search(rb"Terrain\d{4}", m.soft_sub):
             if bd_piece is None:
@@ -429,6 +448,9 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         else:
             k, d, s, _ = assign(cen)
             k[~lat_ok(s, d, cfg.prop_lateral)] = -1
+            for kk in np.unique(k[k >= 0]):
+                m_ = k == kk
+                k[np.flatnonzero(m_)[~owns(int(kk), cen[m_])]] = -1
         for kk in np.unique(k[k >= 0]):
             sel = tri[k == kk]
             used, inv = np.unique(sel, return_inverse=True)
