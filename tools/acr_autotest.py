@@ -103,6 +103,24 @@ def main():
         if "IN_CAR" not in ui() and ui() and ui() != fp:
             press("A")
     print("in car:", ui(), flush=True)
+    # drive off the start line (the start sequence holds the camera until then)
+    import mmap
+    import struct
+    phys = mmap.mmap(-1, 1024, "Local\\acpmf_physics", access=mmap.ACCESS_READ)
+    speed = lambda: struct.unpack_from("<f", phys, 28)[0]          # km/h
+    gear = lambda: struct.unpack_from("<i", phys, 16)[0]           # 0 R, 1 N, 2 1st
+    time.sleep(6)
+    t0 = time.time()
+    while speed() < 15 and time.time() - t0 < 40:
+        if gear() < 2:
+            press("A")                                             # manual gearbox: up into 1st
+        focus()
+        pad.right_trigger_float(value_float=0.6); pad.update()
+        time.sleep(1)
+    pad.right_trigger_float(value_float=0.0); pad.left_trigger_float(value_float=1.0); pad.update()
+    time.sleep(3)
+    pad.left_trigger_float(value_float=0.0); pad.update()
+    print(f"drove off ({speed():.0f} km/h now)", flush=True)
     del pad
     if a.drive:                                          # autopilot drive-through instead of the camera tour
         import glob

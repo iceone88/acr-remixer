@@ -7,7 +7,7 @@
 --  * live hook: ../live.lua is re-run whenever it changes
 -- All game calls run via ExecuteInGameThread. Teleporting the physics car crashes the game.
 local here = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("(.*/)")
-local POINTS, LIVE, UI = here .. "../points.txt", here .. "../live.lua", here .. "../ui.txt"
+local POINTS, LIVE, UI, GO = here .. "../points.txt", here .. "../live.lua", here .. "../ui.txt", here .. "../go.txt"
 
 local function insts(cls)
     local out = {}
@@ -79,7 +79,12 @@ local function step()
     if done then return end
     t = t + 1
     if state == "wait_car" then
-        if in_car() then
+        -- the start sequence locks the camera: start only once the host says the
+        -- car has driven off the line (it writes ../go.txt)
+        local g = io.open(GO, "r")
+        if g then g:close() end
+        if g and in_car() then
+            os.remove(GO)
             points = load_points()
             if points and #points > 0 then
                 state, t = "settle", 0
@@ -88,7 +93,7 @@ local function step()
         else
             t = 0
         end
-    elseif state == "settle" and t >= 20 then           -- ~10 s for the stage to stream in
+    elseif state == "settle" and t >= 4 then
         if not debug_cam_active() then console("ToggleDebugCamera") end
         state, t = "cam", 0
     elseif state == "cam" and t >= 4 then               -- debug camera exists after a moment

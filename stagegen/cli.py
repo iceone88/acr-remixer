@@ -79,8 +79,23 @@ def _build_wp(a, paks: str) -> int:
         f.write(to_json(layout, {"seed": a.seed, "source": "game", "level": a.level}))
     plot_layout(layout, os.path.join(out, "layout.png"),
                 f"{a.level} seed {a.seed}: {layout.length/1000:.2f} km ({order})", 40)
+    import ast
+    import dataclasses
     from .build.wp import WPConfig
-    rep = build_wp_stage(layout, best, cuts, grid, ws, paks, out, WPConfig(debug_spawn_s=a.spawn_at, debug_no_clip=a.no_clip, debug_offset_zero=a.offset_zero, debug_offset=None if a.offset is None else tuple(float(v) for v in a.offset.split(',')) ))
+    cfg = WPConfig(debug_spawn_s=a.spawn_at, debug_no_clip=a.no_clip, debug_offset_zero=a.offset_zero,
+                   debug_offset=None if a.offset is None else tuple(float(v) for v in a.offset.split(',')))
+    fields = {f.name for f in dataclasses.fields(WPConfig)}
+    for kv in getattr(a, "cfg", []) or []:
+        k, _, v = kv.partition("=")
+        if k not in fields:
+            raise SystemExit(f"--cfg: unknown option {k!r}; known: {', '.join(sorted(fields))}")
+        try:
+            val = ast.literal_eval(v)
+        except (ValueError, SyntaxError):
+            val = v
+        setattr(cfg, k, val)
+        print(f"  option {k} = {val!r}")
+    rep = build_wp_stage(layout, best, cuts, grid, ws, paks, out, cfg)
     from .build.preview import render_collision
     fwd = next(p for p, k in ws.route_cells.items() if k == "fwd")
     render_collision(rep.out_files[0], ws.baked, fwd, os.path.join(out, "collision.png"),
@@ -231,6 +246,8 @@ def main(argv=None):
     b.add_argument("--no-clip", action="store_true", help="test builds: leave track meshes unclipped")
     b.add_argument("--offset-zero", action="store_true", help="test builds: build on top of the original map")
     b.add_argument("--offset", default=None, help="test builds: placement offset x,y,z in metres")
+    b.add_argument("--cfg", action="append", default=[], metavar="KEY=VALUE",
+                   help="set any build option (see WPConfig), e.g. --cfg seam_width=40 --cfg filler=False")
     ins = sub.add_parser("install", help="copy a built stage container into acr/Content/Paks/~mods")
     ins.add_argument("build_dir", help="folder written by `build`, e.g. out/WrcgEsSS1_seed0")
     ins.add_argument("--paks")

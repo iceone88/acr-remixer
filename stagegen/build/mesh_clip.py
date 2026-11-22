@@ -88,6 +88,22 @@ def clip_mesh_payload(b: bytes, keep_fn) -> tuple[bytes, dict]:
     return bytes(out), stats
 
 
+def displace_payload(b: bytes, dz_fn) -> tuple[bytes, float]:
+    """Move vertices vertically in every LOD: dz_fn(positions_cm (N,3) mesh-local) -> dz_cm (N,).
+    Returns the payload and the largest |dz| applied (cm)."""
+    out = bytearray(b)
+    mx = 0.0
+    for lod in find_lods(b):
+        P = np.frombuffer(b, "<f4", 3 * lod.n, lod.pos_off).reshape(-1, 3).astype(np.float64)
+        dz = np.asarray(dz_fn(P), np.float64)
+        if not np.any(dz):
+            continue
+        mx = max(mx, float(np.abs(dz).max()))
+        P[:, 2] += dz
+        out[lod.pos_off: lod.pos_off + 12 * lod.n] = P.astype("<f4").tobytes()
+    return bytes(out), mx
+
+
 def mesh_export_index(pk: Package) -> int:
     """The UStaticMesh export (the largest one that is not the BodySetup)."""
     cands = [(e.serial_size, i) for i, e in enumerate(pk.exports) if not e.name.startswith("BodySetup")]

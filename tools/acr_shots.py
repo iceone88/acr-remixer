@@ -73,6 +73,9 @@ def main():
         for p in pts:
             f.write("%s %.1f %.1f %.1f %.1f\n" % p)
     print(f"{len(pts)} points written", flush=True)
+    go = os.path.join(mod, "go.txt")
+    if os.path.exists(go):
+        os.remove(go)
     if a.prepare:
         return
     os.makedirs(a.out, exist_ok=True)
@@ -81,6 +84,7 @@ def main():
     sys.path.insert(0, HERE)
     from acr_harness import shot
     pos = os.path.getsize(LOG) if os.path.exists(LOG) else 0
+    open(go, "w").close()            # tour starts now (the car must have driven off the start line)
     got, t0 = [], time.time()
     while time.time() - t0 < a.timeout:
         time.sleep(0.5)
