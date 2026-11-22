@@ -71,6 +71,7 @@ class WPConfig:
     filler: bool = True                  # backdrop terrain becomes ground under the whole new stage
     filler_below: float = 1.5            # m: filler sits this far below the stage terrain
     own_level: str | None = None          # write the level under this name (/Game/Levels/<name>), not over the original
+    display_name: str | None = None       # menu name of an own-level stage
     giant_mesh_m: float = 400.0         # m: meshes wider than this are scenery, never moved as props
     bg_clear: float = 2000.0           # m: background (satellite map) mesh hidden this close to the new route
     # foliage, each "move" (follows the piece owning its spot) or "hide" (left out, faster)
@@ -1294,6 +1295,15 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 out_pkgs[path] = (new_path, rename_package(data, ren))
         rep.checks.append(f"own level: {sum(1 for p in new_pkgs if p not in level_paths)} changed assets copied to "
                           f"/Game/Stagegen/{cfg.own_level}/")
+        # menu entries: rows in the track tables, built on the tables as
+        # installed (other mods' rows, e.g. WRCG's, survive)
+        from .tables import stage_entries
+        fsm = GameFS(paks_dir, include_mods=True)
+        tbl, tnotes = stage_entries(fsm, lvl, cfg.own_level, cfg.display_name or f"Stagegen {cfg.own_level}",
+                                    layout.length / 1000)
+        for path, data in tbl.items():
+            out_pkgs[path] = (path, data)
+        rep.checks += [f"menu: {n}" for n in tnotes]
         src_headers: dict = {}
         entries = {}
         for path, (new_path, data) in out_pkgs.items():

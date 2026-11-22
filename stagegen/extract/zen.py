@@ -22,18 +22,17 @@ class Export:
 
 
 def read_name_batch(d: bytes, p: int) -> tuple[list[str], int]:
-    n, nbytes = struct.unpack_from("<II", d, p); p += 8
+    n, = struct.unpack_from("<I", d, p)
     if n == 0:
-        return [], p
+        return [], p + 4   # an empty batch is just the count
+    p += 8
     p += 8                 # hash version
     p += 8 * n             # hashes
     lens = [struct.unpack_from(">H", d, p + 2 * i)[0] for i in range(n)]; p += 2 * n
     names = []
     for L in lens:
         if L & 0x8000:
-            L &= 0x7FFF
-            if p & 1:
-                p += 1
+            L &= 0x7FFF        # UTF-16, not aligned
             names.append(d[p: p + 2 * L].decode("utf-16-le")); p += 2 * L
         else:
             names.append(d[p: p + L].decode("latin-1")); p += L

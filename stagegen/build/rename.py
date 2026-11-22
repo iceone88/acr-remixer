@@ -47,7 +47,7 @@ def rename_package(d: bytes, rename: Callable[[str], str]) -> bytes:
     nb_start = struct.calcsize(SUMMARY)
     nb_end, hv = _name_batch_end(d, nb_start)
     new_names = [rename(n) for n in pk.names]
-    new_nb = _name_batch(new_names, hv or 0xC1640000)
+    new_nb = _name_batch(new_names, hv or 0xC1640000, nb_start)
 
     # imported package names: name batch + numbers
     ipn_off = pk.imported_pkg_names_off
@@ -55,10 +55,9 @@ def rename_package(d: bytes, rename: Callable[[str], str]) -> bytes:
     ipn_end = p + 4 * len(ipn_names)
     nums = struct.unpack_from(f"<{len(ipn_names)}I", d, p)
     _, ipn_hv = _name_batch_end(d, ipn_off)
-    new_ipn = _name_batch([rename(n) for n in ipn_names], ipn_hv or hv or 0xC1640000) + \
-        struct.pack(f"<{len(nums)}I", *nums)
-
     d1 = len(new_nb) - (nb_end - nb_start)
+    new_ipn = _name_batch([rename(n) for n in ipn_names], ipn_hv or hv or 0xC1640000, ipn_off + d1) + \
+        struct.pack(f"<{len(nums)}I", *nums)
     d2 = len(new_ipn) - (ipn_end - ipn_off)
     for k in range(6, 15):                    # offset fields of the summary
         if summ[k] <= 0 and k >= 13:

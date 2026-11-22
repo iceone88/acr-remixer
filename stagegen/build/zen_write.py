@@ -11,17 +11,19 @@ SUMMARY = "<IIIIIIiiiiiiiii"     # UE 5.5+/5.6 FZenPackageSummary (60 bytes)
 OFFSET_FIELDS = range(6, 15)      # offsets that point past the name batch
 
 
-def _name_batch(names: list[str], hash_version: int) -> bytes:
+def _name_batch(names: list[str], hash_version: int, base: int = 0) -> bytes:
+    """Zen name batch. Pure 7-bit names narrow, others UTF-16 (unaligned).
+    `base` (the package offset it is written at) is currently unused."""
     enc = []
     for n in names:
-        try:
-            enc.append((False, n.encode("latin-1")))
-        except UnicodeEncodeError:
+        if n.isascii():    # UE writes only 7-bit names narrow
+            enc.append((False, n.encode("ascii")))
+        else:
             enc.append((True, n.encode("utf-16-le")))
+    if not names:
+        return struct.pack("<I", 0)    # an empty batch is just the count
     nbytes = sum(len(b) for _, b in enc)
     out = bytearray(struct.pack("<II", len(names), nbytes))
-    if not names:
-        return bytes(out)
     out += struct.pack("<Q", hash_version)
     for n in names:
         out += struct.pack("<Q", name_hash(n))
@@ -29,24 +31,22 @@ def _name_batch(names: list[str], hash_version: int) -> bytes:
         L = len(b) // 2 if wide else len(b)
         out += struct.pack(">H", L | (0x8000 if wide else 0))
     for wide, b in enc:
-        out += b
+        out += b                       # UTF-16 strings are not aligned
     return bytes(out)
 
 
 def _name_batch_end(d: bytes, p: int) -> tuple[int, int]:
     """Return (end offset, hash_version) of the name batch starting at p."""
-    n, nbytes = struct.unpack_from("<II", d, p)
+    n, = struct.unpack_from("<I", d, p)
     if n == 0:
-        return p + 8, 0
+        return p + 4, 0    # an empty batch is just the count
     hv, = struct.unpack_from("<Q", d, p + 8)
     q = p + 16 + 8 * n
     lens = [struct.unpack_from(">H", d, q + 2 * i)[0] for i in range(n)]
     q += 2 * n
     for L in lens:
         if L & 0x8000:
-            if q & 1:
-                q += 1
-            q += 2 * (L & 0x7FFF)
+            q += 2 * (L & 0x7FFF)     # UTF-16, not aligned
         else:
             q += L
     return q, hv
@@ -63,7 +63,7 @@ def rewrite_package(pk: Package, payloads: dict[int, bytes], names: list[str] | 
     else:
         if names[: len(pk.names)] != pk.names:
             raise ValueError("names may only be appended")
-        new_nb = _name_batch(names, hv or 0xC1640000)
+        new_nb = _name_batch(names, hv or 0xC1640000, nb_start)
     delta = len(new_nb) - (nb_end - nb_start)
     for i in OFFSET_FIELDS:
         summ[i] += delta
