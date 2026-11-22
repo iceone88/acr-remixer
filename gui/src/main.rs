@@ -71,6 +71,8 @@ struct Prefs {
     launch: bool,
     /// development: run `python -m stagegen.cli` from backend_dir instead of the embedded backend
     use_python: bool,
+    /// block ACR's network access (Windows Firewall) while a generated stage is installed
+    block_online: bool,
 }
 
 impl Default for Prefs {
@@ -99,8 +101,64 @@ impl Default for Prefs {
             install: true,
             launch: false,
             use_python: BACKEND.is_none(),
+            block_online: false,
         }
     }
+}
+
+/// The generated stage currently installed in the game's ~mods folder (level name).
+fn installed_stage(acr_dir: &str) -> Option<String> {
+    let mods = PathBuf::from(acr_dir).join(r"acr\Content\Paks\~mods");
+    std::fs::read_dir(mods).ok()?.filter_map(|e| e.ok()).find_map(|e| {
+        let n = e.file_name().to_string_lossy().into_owned();
+        n.strip_prefix("pakchunk99-")?.strip_suffix("_Stagegen_9_P.utoc").map(|s| s.to_string())
+    })
+}
+
+const FW_RULE: &str = "acr-stagegen: block ACR online";
+
+fn quiet(cmd: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+}
+
+/// Is the firewall rule that blocks ACR's network access present?
+fn fw_blocked() -> bool {
+    quiet(Command::new("netsh").args(["advfirewall", "firewall", "show", "rule", &format!("name={FW_RULE}")]))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Add (in + out) or remove the blocking rule for acr.exe; one UAC prompt.
+fn fw_set(acr_dir: &str, block: bool) -> Result<(), String> {
+    let exe = PathBuf::from(acr_dir).join(r"acr\Binaries\Win64\acr.exe");
+    let mut cmds = format!("netsh advfirewall firewall delete rule name=\"{FW_RULE}\"");
+    if block {
+        if !exe.is_file() {
+            return Err(format!("{} not found", exe.display()));
+        }
+        for dir in ["out", "in"] {
+            cmds.push_str(&format!(
+                " & netsh advfirewall firewall add rule name=\"{FW_RULE}\" dir={dir} action=block program=\"{}\" enable=yes",
+                exe.display()
+            ));
+        }
+    }
+    let ps = format!(
+        "Start-Process cmd -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '/c {}'",
+        cmds.replace('\'', "''")
+    );
+    let st = quiet(Command::new("powershell").args(["-NoProfile", "-Command", &ps]))
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !st.success() {
+        return Err("cancelled or no admin rights".into());
+    }
+    if fw_blocked() != block {
+        return Err("the firewall rule did not change (admin prompt declined?)".into());
+    }
+    Ok(())
 }
 
 /// The finished route of a built stage (from layout.json).
@@ -163,6 +221,9 @@ struct App {
     job: Option<Job>,
     preview: Option<Preview>,
     tab: Tab,
+    /// generated stage in ~mods, firewall block present (refreshed on events)
+    installed: Option<String>,
+    blocked: bool,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -175,8 +236,10 @@ enum Tab {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
-        let mut app = App { prefs, log: String::new(), job: None, preview: None, tab: Tab::Map };
+        let mut app = App { prefs, log: String::new(), job: None, preview: None, tab: Tab::Map,
+                            installed: None, blocked: false };
         app.preview = load_preview(&app.out_for(app.prefs.seed)).ok();     // reopen the last stage
+        app.refresh_install_state();
         app
     }
 
@@ -236,6 +299,26 @@ impl App {
         }
     }
 
+    fn refresh_install_state(&mut self) {
+        self.installed = installed_stage(&self.prefs.acr_dir);
+        self.blocked = fw_blocked();
+    }
+
+    /// Make the firewall block match: on while a generated stage is installed
+    /// (if wanted), off otherwise. Asks for admin rights only when it changes.
+    fn sync_firewall(&mut self) {
+        self.refresh_install_state();
+        let want = self.prefs.block_online && self.installed.is_some();
+        if want != self.blocked {
+            match fw_set(&self.prefs.acr_dir, want) {
+                Ok(()) => self.log.push_str(if want { "ACR's internet access is blocked while the generated stage is installed.\n" }
+                                            else { "ACR's internet access is allowed again.\n" }),
+                Err(e) => self.log.push_str(&format!("firewall: {e}\n")),
+            }
+            self.blocked = fw_blocked();
+        }
+    }
+
     /// Remove installed generated stages from the game (restores the originals).
     fn uninstall(&mut self) {
         let p = self.prefs.clone();
@@ -287,6 +370,9 @@ impl App {
             } else {
                 self.log.push_str("build failed (see above)\n");
                 self.job = None;
+            }
+            if self.job.is_none() {
+                self.sync_firewall();
             }
         }
     }
@@ -362,6 +448,36 @@ impl eframe::App for App {
         }
         let busy = self.job.is_some();
 
+        if let Some(stage) = self.installed.clone() {
+            let mut do_uninstall = false;
+            let mut do_block = false;
+            egui::TopBottomPanel::top("installed").show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(egui::Color32::from_rgb(230, 150, 40),
+                        format!("⚠ Generated stage installed ({stage}): it replaces the original stage. \
+                                 Play offline; times would count for the original."));
+                    if self.blocked {
+                        ui.colored_label(egui::Color32::from_rgb(90, 180, 90), "🔒 ACR online blocked");
+                    } else if !busy && ui.small_button("Block ACR online").clicked() {
+                        do_block = true;
+                    }
+                    if !busy && ui.small_button("Uninstall").clicked() {
+                        do_uninstall = true;
+                    }
+                });
+                ui.add_space(4.0);
+            });
+            if do_block {
+                self.prefs.block_online = true;
+                self.sync_firewall();
+            }
+            if do_uninstall {
+                self.uninstall();
+            }
+        }
+
+        let mut block_changed = false;
         egui::SidePanel::left("opts").min_width(330.0).show(ctx, |ui| {
             ui.heading("acr-stagegen");
             ui.add_space(6.0);
@@ -419,6 +535,11 @@ impl eframe::App for App {
                 });
                 ui.checkbox(&mut p.install, "Install into the game (closes ACR)");
                 ui.add_enabled(p.install, egui::Checkbox::new(&mut p.launch, "Start ACR afterwards"));
+                block_changed = ui.checkbox(&mut p.block_online, "Block ACR online while a stage is installed")
+                    .on_hover_text("Adds a Windows Firewall rule for acr.exe while a generated stage is installed and \
+                                    removes it on uninstall, so no times reach the online leaderboards. \
+                                    Windows asks for admin rights each time it changes.")
+                    .changed();
             });
             ui.add_space(8.0);
             let ready = steam::is_acr_dir(Path::new(&self.prefs.acr_dir))
@@ -458,6 +579,10 @@ impl eframe::App for App {
                                  pv.joins.len() + 1, pv.notes));
             }
         });
+
+        if block_changed && !busy {
+            self.sync_firewall();
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {

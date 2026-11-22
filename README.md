@@ -61,6 +61,10 @@ To get the original stage back, press **Uninstall generated stage**.
 | **Batch** | Builds several stages in a row (seed, seed+1, …), so you can compare them on the map. Only the last one is installed. |
 | **Forest / Grass & rocks / Ground grass** | Trees and plants along the road. Untick some if your PC struggles; the stage then looks barer but runs faster. |
 | **Install / Start ACR** | Put the stage into the game automatically, and optionally start the game. |
+| **Block ACR online while a stage is installed** | Optional. Adds a Windows Firewall rule that cuts ACR off from the internet while a generated stage is installed, and removes it again when you uninstall, so no times from a generated stage can reach the online leaderboards. Windows asks for admin rights each time the rule changes. |
+
+While a generated stage is installed, an orange bar at the top of the window
+says so, with buttons to block ACR online or uninstall the stage.
 
 The **Map** tab shows the new route from above (each colour is one piece of an
 original stage), **Elevation** shows the height profile with the joins marked,
