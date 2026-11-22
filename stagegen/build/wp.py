@@ -529,21 +529,39 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             P = np.vstack(pts)
             surf[j] = (cKDTree(P[:, :2]), P[:, 2])
 
+    # continuous height of each piece's terrain: mean height per 4 m cell, gaps
+    # filled from the nearest cell, bilinear in between; plus the (bilinear)
+    # distance to real data for the confidence. (IDW over the k nearest
+    # vertices jumped when a neighbour swapped: up to 0.7 m steps on the road.)
+    from scipy.interpolate import RegularGridInterpolator
+    from scipy.ndimage import distance_transform_edt
+    surf_grid = {}
+    GC = 4.0
+    for j, (tr, z) in surf.items():
+        XY = tr.data
+        lo_ = XY.min(0) - 48.0
+        nx, ny = (np.ceil((XY.max(0) + 48.0 - lo_) / GC).astype(int) + 1)
+        ix = np.clip(((XY[:, 0] - lo_[0]) / GC).round().astype(int), 0, nx - 1)
+        iy = np.clip(((XY[:, 1] - lo_[1]) / GC).round().astype(int), 0, ny - 1)
+        S_ = np.zeros((nx, ny)); N_ = np.zeros((nx, ny))
+        np.add.at(S_, (ix, iy), z); np.add.at(N_, (ix, iy), 1.0)
+        valid = N_ > 0
+        dist, (jx, jy) = distance_transform_edt(~valid, return_indices=True)
+        Zg = np.where(valid, S_ / np.maximum(N_, 1.0), 0.0)[jx, jy]
+        gx = lo_[0] + GC * np.arange(nx); gy = lo_[1] + GC * np.arange(ny)
+        surf_grid[j] = (RegularGridInterpolator((gx, gy), Zg, bounds_error=False, fill_value=np.nan),
+                        RegularGridInterpolator((gx, gy), dist * GC, bounds_error=False, fill_value=1e9))
+
     def surface_z(j, xy):
-        """(height, confidence): IDW of piece j's surface; confidence fades from 1
-        (sample within 12 m) to 0 (none within 40 m) so corrections never jump."""
-        if j not in surf:
+        """(height, confidence) of piece j's terrain at xy, continuous; confidence
+        fades from 1 (data within 12 m) to 0 (none within 40 m)."""
+        if j not in surf_grid:
             return np.full(len(xy), np.nan), np.zeros(len(xy))
-        tr, z = surf[j]
-        d, ii = tr.query(xy, k=4, distance_upper_bound=40.0)
-        ok = np.isfinite(d)
-        ii = np.where(ok, ii, 0)
-        wts = np.where(ok, 1.0 / (d + 0.5), 0.0)
-        sw = wts.sum(1)
-        h = np.where(sw > 0, (wts * z[ii]).sum(1) / np.maximum(sw, 1e-9), np.nan)
-        dmin = np.where(ok[:, 0], d[:, 0], np.inf)
-        conf = np.clip((40.0 - dmin) / 28.0, 0.0, 1.0)
-        return h, conf
+        hz, hd = surf_grid[j]
+        q = np.atleast_2d(xy)[:, :2]
+        h = hz(q)
+        conf = np.clip((40.0 - hd(q)) / 28.0, 0.0, 1.0)
+        return np.where(conf > 0, h, np.nan), conf
 
     def seam_dz(j, P_new_m):
         """Vertical correction (m) for points of piece j at new-layout positions."""
