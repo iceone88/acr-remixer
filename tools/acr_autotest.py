@@ -46,6 +46,8 @@ def main():
     ap.add_argument("--drive", action="store_true", help="autopilot drive-through instead of the camera tour")
     ap.add_argument("--stop-at-fp", action="store_true", help="stop on the Free Practice screen (menu mapping)")
     ap.add_argument("--from-fp", action="store_true", help="game already on the Free Practice screen: just run")
+    ap.add_argument("--select", default=None, metavar="R,T",
+                    help="pick rally #R (Alsace=1 ... Wales=6 with one mod rally first) and stage tile #T first")
     a = ap.parse_args()
     import vgamepad as vg
     from acr_harness import BUTTONS, focus, kill
@@ -75,7 +77,20 @@ def main():
     title = lambda s: "WB_SplashScreen_C" in s.split(",")      # 'press any button' (not the logo intro)
     if a.from_fp:
         return after_fp(a, py, press, pad, ui())
-    s = wait_ui(title, 300, "title screen")
+    s = None
+    for attempt in range(2):                             # the game occasionally dies during the intro
+        try:
+            s = wait_ui(title, 240, "title screen")
+            break
+        except SystemExit:
+            alive = "acr.exe" in subprocess.run(["tasklist", "/FI", "IMAGENAME eq acr.exe"], capture_output=True,
+                                                text=True).stdout.lower()
+            if alive or attempt:
+                raise
+            print("ACR died during the intro; relaunching", flush=True)
+            if os.path.exists(UI):
+                os.remove(UI)
+            os.startfile("steam://rungameid/3917090")
     print("title:", s, flush=True)
     t0 = time.time()
     while title(ui()):
@@ -101,9 +116,31 @@ def main():
     if fp is None:
         raise SystemExit("could not reach free practice")
     print("free practice:", fp, flush=True)
+    if a.select:
+        select_stage(a.select, press)
+        fp = ui()
     if a.stop_at_fp:
         return
     return after_fp(a, py, press, pad, fp)
+
+
+def select_stage(spec: str, press):
+    """Free Practice: Change Rally Stage -> rally #R in the list -> stage tile #T
+    -> first variant -> SELECT. spec "R,T" (rally order: [mods], Alsace, Greece,
+    Livigno, Monte Carlo, Sweden, Wales; tiles left to right)."""
+    r, t = (int(v) for v in spec.split(","))
+    time.sleep(2)
+    press("UP", 2); press("LEFT"); press("A")
+    wait_ui(lambda s: "WB_TrackPage_C" in s, 20, "rally selection")
+    time.sleep(1.5)
+    press("LEFT", 10); press("RIGHT", r); press("A")
+    time.sleep(1.5)
+    press("LEFT", 3); press("RIGHT", t); press("A")
+    time.sleep(1.0)
+    press("DOWN"); press("A")
+    s = wait_ui(lambda s: "WB_TimeAttackHubLayout_C" in s, 20, "free practice after selecting the stage")
+    print(f"selected rally {r}, stage {t}", flush=True)
+    return s
 
 
 def after_fp(a, py, press, pad, fp):

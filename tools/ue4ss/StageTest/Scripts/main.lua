@@ -129,7 +129,11 @@ LoopAsync(500, function()
     return false
 end)
 
+local T0 = os.time()
 LoopAsync(1000, function()
+    -- querying the UI widgets while the engine is still constructing them
+    -- (logo intro) occasionally crashed UE4SS natively: start a little later
+    if os.time() - T0 < 15 then return false end
     ExecuteInGameThread(function()
         local act = {}
         pcall(function()
