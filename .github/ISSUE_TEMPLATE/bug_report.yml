@@ -1,0 +1,59 @@
+name: Bug report
+description: Something doesn't work (the program, a build, or a stage in the game)
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! The quickest way to help: in ACR Remixer open
+        **Bug report → Export bug report** and attach the file below. It contains
+        your settings, the log of the last run and ACR's newest crash reports;
+        your Windows user name is hidden.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what happened instead?
+      placeholder: |
+        Generated Hafren South with seed 12, 6 km. The game crashed while loading the stage.
+    validations:
+      required: true
+  - type: input
+    id: code
+    attributes:
+      label: Share code of the stage
+      description: From "Share a stage" or the 📋 Share button of the installed stage, so we can build the same one.
+      placeholder: WalesS4HafrenSouth/6000/12/FGL
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where does it go wrong?
+      options:
+        - In ACR Remixer (window, building, installing)
+        - The game crashes (loading or driving)
+        - The stage looks wrong (holes, floating parts, missing ground)
+        - The stage drives wrong (falling through, walls, wrong pacenotes)
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: where_on_stage
+    attributes:
+      label: Where on the stage? (if it's in the game)
+      description: Roughly how far from the start, and screenshots if you have them (Steam screenshots work great).
+  - type: textarea
+    id: report
+    attributes:
+      label: Bug report file
+      description: Drag the exported `acr-remixer-bugreport-….txt` file here.
+  - type: input
+    id: version
+    attributes:
+      label: ACR Remixer version
+      description: Shown at the bottom of the window (e.g. "ACR Remixer 0.1.0 (nightly 2026-11-23)").
+  - type: checkboxes
+    id: mods
+    attributes:
+      label: Other mods
+      options:
+        - label: I have other ACR mods installed (e.g. extra stages or cars) in `Content\Paks\~mods`

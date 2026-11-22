@@ -1,0 +1,21 @@
+name: Share a great stage
+description: Found a remix that's fun to drive? Share its code so others can build it too
+labels: [showcase]
+body:
+  - type: input
+    id: code
+    attributes:
+      label: Share code
+      description: From "Share a stage" or the 📋 Share button of an installed stage.
+      placeholder: WalesS4HafrenSouth/8000/1/FGL/x2
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: What makes it good?
+      description: Fast and flowing, a tricky section, a good practice loop, …
+  - type: textarea
+    id: shots
+    attributes:
+      label: Screenshots or your time (optional)
