@@ -65,13 +65,16 @@ def main():
     ap.add_argument("--every", type=float, default=600)
     ap.add_argument("--out", default=os.path.join(os.environ.get("TEMP", "."), "acrshots", "sheet"))
     ap.add_argument("--timeout", type=float, default=1800)
+    ap.add_argument("--prepare", action="store_true", help="only install the mod and write the points")
     a = ap.parse_args()
     mod = install_mod()
     pts = points_for(a.build, a.every)
     with open(os.path.join(mod, "points.txt"), "w") as f:
         for p in pts:
             f.write("%s %.1f %.1f %.1f %.1f\n" % p)
-    print(f"{len(pts)} points written; start the stage session (mod teleports once you're in the car)", flush=True)
+    print(f"{len(pts)} points written", flush=True)
+    if a.prepare:
+        return
     os.makedirs(a.out, exist_ok=True)
     for old in glob.glob(os.path.join(a.out, "*.jpg")):
         os.remove(old)

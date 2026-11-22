@@ -1,14 +1,23 @@
 -- StageTest (acr-stagegen): camera tour of a generated stage for screenshots.
---  * once the player is in a car (possessed pawn is not a camera) and ~10 s
---    have passed, switch to the debug camera and fly its SpectatorPawn to each
---    point in ../points.txt ("label x y z yaw", Unreal cm / degrees)
---  * logs "[StageTest] at <label> want=(..) cam=(..)" when in place, "done" at the end
---  * live hook: ../live.lua is re-run whenever it changes (iterate without restarts)
--- Teleporting the physics car itself crashes the game; only the camera moves.
+--  * when the player is in a car, waits ~10 s, switches to the debug camera,
+--    makes it possess its SpectatorPawn and flies that to each point of
+--    ../points.txt ("label x y z yaw", Unreal cm / degrees)
+--  * logs "[StageTest] at <label> want=(..) cam=(..)" at each point, "done" at the end
+--  * writes the active CommonUI screens (+ IN_CAR) to ../ui.txt for host-side menu automation
+--  * live hook: ../live.lua is re-run whenever it changes
+-- All game calls run via ExecuteInGameThread: calling UFunctions from the async
+-- loop thread hangs or crashes the game. Teleporting the physics car crashes it too.
 local here = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("(.*/)")
-local POINTS, LIVE = here .. "../points.txt", here .. "../live.lua"
+local POINTS, LIVE, UI = here .. "../points.txt", here .. "../live.lua", here .. "../ui.txt"
 
-local function v(l) return l and string.format("(%.0f, %.0f, %.0f)", l.X / 100, l.Y / 100, l.Z / 100) or "nil" end
+local function insts(cls)
+    local out = {}
+    for _, o in ipairs(FindAllOf(cls) or {}) do
+        if o:IsValid() and not string.find(o:GetFName():ToString(), "^Default__") then table.insert(out, o) end
+    end
+    return out
+end
+local function inst(cls) return insts(cls)[1] end
 
 local function load_points()
     local f = io.open(POINTS, "r")
@@ -23,16 +32,14 @@ local function load_points()
 end
 
 local function controller()
-    for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
-        if pc:IsValid() and pc:GetClass():GetFName():ToString() ~= "DebugCameraController" then return pc end
+    for _, pc in ipairs(insts("PlayerController")) do
+        if pc:GetClass():GetFName():ToString() ~= "DebugCameraController" then return pc end
     end
 end
 
 local function console(cmd)
     local pc = controller()
-    if not pc then return false end
-    StaticFindObject("/Script/Engine.Default__KismetSystemLibrary"):ExecuteConsoleCommand(pc, cmd, pc)
-    return true
+    if pc then StaticFindObject("/Script/Engine.Default__KismetSystemLibrary"):ExecuteConsoleCommand(pc, cmd, pc) end
 end
 
 local function in_car()
@@ -42,67 +49,92 @@ local function in_car()
     return not string.find(p:GetClass():GetFName():ToString(), "Camera")
 end
 
-local function debug_cam(on)
-    local dcc = FindFirstOf("DebugCameraController")
-    local active = (dcc ~= nil) and dcc:IsValid()
-    if on ~= active then console("ToggleDebugCamera") end
+local function debug_cam_active()            -- the debug camera owns the local player while active
+    local d = inst("DebugCameraController")
+    if not d then return false end
+    local ok, p = pcall(function() return d.Player end)
+    return ok and p ~= nil and p:IsValid()
 end
 
-local function view_at(pt)
-    debug_cam(true)
-    local loc = { X = pt[2], Y = pt[3], Z = pt[4] + 400 }
+local function place(pt)          -- the recipe that worked: FindFirstOf, no Possess
     local rot = { Pitch = -12, Yaw = pt[5], Roll = 0 }
     local sp = FindFirstOf("SpectatorPawn")
-    if sp and sp:IsValid() then sp:K2_TeleportTo(loc, rot) end
-    local dcc = FindFirstOf("DebugCameraController")
-    if dcc and dcc:IsValid() then dcc:SetControlRotation(rot) end
+    if sp and sp:IsValid() then sp:K2_TeleportTo({ X = pt[2], Y = pt[3], Z = pt[4] + 400 }, rot) end
+    local d = FindFirstOf("DebugCameraController")
+    if d and d:IsValid() then d:SetControlRotation(rot) end
+    return true
 end
 
-local function cam_loc()
-    local ok, r = pcall(function() return v(FindFirstOf("DebugCameraController").PlayerCameraManager:GetCameraLocation()) end)
-    return ok and r or "?"
+local function cam_text()
+    local d = FindFirstOf("DebugCameraController")
+    local l = d and d.PlayerCameraManager:GetCameraLocation()
+    return l and string.format("(%.0f, %.0f, %.0f)", l.X / 100, l.Y / 100, l.Z / 100) or "?"
 end
 
--- tour state machine, ticks every 0.5 s
+-- tour state machine; ticks every 0.5 s, each tick's work runs on the game thread
 local state, points, i, t, done = "wait_car", nil, 0, 0, false
-local function restart() state, points, i, t, done = "wait_car", nil, 0, 0, false end
-StageTestAPI = { console = console, view_at = view_at, restart = restart, debug_cam = debug_cam }
-
-LoopAsync(500, function()
-    local ok, err = pcall(function()
-        if done then return end
-        t = t + 1
-        if state == "wait_car" then
-            if in_car() then
-                points = load_points()
-                if points and #points > 0 then
-                    state, t = "settle", 0
-                    print(string.format("[StageTest] in car, %d points\n", #points))
-                end
-            else
-                t = 0
+local function step()
+    if done then return end
+    t = t + 1
+    if state == "wait_car" then
+        if in_car() then
+            points = load_points()
+            if points and #points > 0 then
+                state, t = "settle", 0
+                print(string.format("[StageTest] in car, %d points\n", #points))
             end
-        elseif state == "settle" and t >= 20 then        -- ~10 s for the stage to stream in
-            state, i, t = "move", 0, 0
-        elseif state == "move" then
-            i = i + 1
-            if i > #points then
-                debug_cam(false)
-                print("[StageTest] done\n")
-                done = true
-                return
-            end
-            view_at(points[i])
-            state, t = "hold", 0
-        elseif state == "hold" and t >= 5 then             -- 2.5 s to stream, then shoot
-            print(string.format("[StageTest] at %s want=(%.0f, %.0f) cam=%s\n", points[i][1],
-                points[i][2] / 100, points[i][3] / 100, cam_loc()))
-            state, t = "shot", 0
-        elseif state == "shot" and t >= 2 then             -- host grabs within 1 s
-            state = "move"
+        else
+            t = 0
         end
-    end)
+    elseif state == "settle" and t >= 20 then           -- ~10 s for the stage to stream in
+        if not debug_cam_active() then console("ToggleDebugCamera") end
+        state, t = "cam", 0
+    elseif state == "cam" and t >= 4 then               -- debug camera exists after a moment
+        state, i, t = "move", 0, 0
+    elseif state == "move" then
+        i = i + 1
+        if i > #points then
+            if debug_cam_active() then console("ToggleDebugCamera") end
+            print("[StageTest] done\n")
+            done = true
+            return
+        end
+        place(points[i])
+        state, t = "hold", 0
+    elseif state == "hold" and t >= 5 then              -- 2.5 s to stream, then shoot
+        print(string.format("[StageTest] at %s want=(%.0f, %.0f) cam=%s\n", points[i][1],
+            points[i][2] / 100, points[i][3] / 100, cam_text()))
+        state, t = "shot", 0
+    elseif state == "shot" and t >= 2 then              -- host grabs within 1 s
+        state = "move"
+    end
+end
+
+local function restart() state, points, i, t, done = "wait_car", nil, 0, 0, false end
+StageTestAPI = { console = console, place = place, restart = restart, insts = insts, inst = inst }
+
+LoopAsync(500, function()                      -- same thread model as the tour that worked
+    local ok, err = pcall(step)
     if not ok then print("[StageTest] error: " .. tostring(err) .. "\n") end
+    return false
+end)
+
+LoopAsync(1000, function()
+    ExecuteInGameThread(function()
+        local act = {}
+        pcall(function()
+            for _, w in ipairs(insts("CommonActivatableWidget")) do
+                local ok, a = pcall(function() return w:IsActivated() end)
+                if ok and a then act[w:GetClass():GetFName():ToString()] = true end
+            end
+        end)
+        local l = {}
+        for k in pairs(act) do table.insert(l, k) end
+        table.sort(l)
+        local okc, car = pcall(in_car)
+        local f = io.open(UI, "w")
+        if f then f:write(table.concat(l, ",") .. ((okc and car) and ",IN_CAR" or "")); f:close() end
+    end)
     return false
 end)
 
@@ -111,13 +143,15 @@ LoopAsync(1000, function()
     local f = io.open(LIVE, "r")
     if f then
         local src = f:read("*a"); f:close()
-        if live_src == nil then live_src = src end           -- don't re-run a stale file at startup
+        if live_src == nil then live_src = src end          -- don't re-run a stale file at startup
         if src ~= live_src then
             live_src = src
-            local chunk, e = load(src, "live")
-            local ok, r = false, e
-            if chunk then ok, r = pcall(chunk) end
-            print("[StageTest] live: " .. (ok and "ok" or tostring(r)) .. "\n")
+            ExecuteInGameThread(function()
+                local chunk, e = load(src, "live")
+                local ok, r = false, e
+                if chunk then ok, r = pcall(chunk) end
+                print("[StageTest] live: " .. (ok and "ok" or tostring(r)) .. "\n")
+            end)
         end
     end
     return false
