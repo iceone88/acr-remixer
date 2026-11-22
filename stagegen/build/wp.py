@@ -1242,7 +1242,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     # ---- container
     os.makedirs(out_dir, exist_ok=True)
     lvl_container, _ = fs.index[ws.main]
-    pak_name = f"pakchunk99-{lvl}_{cfg.tag}_9_P"
+    pak_name = f"pakchunk99-{cfg.own_level or lvl}_{cfg.tag}_9_P"
     cid = name_hash(pak_name)
     hdr_idx = next(i for i, x in enumerate(lvl_container.chunk_ids) if x[11] == 6)
     chunks = []
@@ -1295,14 +1295,16 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 out_pkgs[path] = (new_path, rename_package(data, ren))
         rep.checks.append(f"own level: {sum(1 for p in new_pkgs if p not in level_paths)} changed assets copied to "
                           f"/Game/Stagegen/{cfg.own_level}/")
-        # menu entries: rows in the track tables, built on the tables as
-        # installed (other mods' rows, e.g. WRCG's, survive)
-        from .tables import stage_entries
-        fsm = GameFS(paks_dir, include_mods=True)
-        tbl, tnotes = stage_entries(fsm, lvl, cfg.own_level, cfg.display_name or f"Stagegen {cfg.own_level}",
-                                    layout.length / 1000)
-        for path, data in tbl.items():
-            out_pkgs[path] = (path, data)
+        # menu entries: not in this container; installing writes one shared
+        # table container for all installed stages from this metadata.
+        # Dry run here so a stage that cannot get rows fails at build time.
+        import json
+        from .tables import STAGE_META, stage_entries
+        meta = {"level": lvl, "name": cfg.own_level, "display": cfg.display_name or f"Stagegen {cfg.own_level}",
+                "length_km": round(layout.length / 1000, 2)}
+        _, tnotes = stage_entries(GameFS(paks_dir, include_mods=True), lvl, meta["name"], meta["display"])
+        with open(os.path.join(out_dir, pak_name + STAGE_META), "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=1)
         rep.checks += [f"menu: {n}" for n in tnotes]
         src_headers: dict = {}
         entries = {}
@@ -1331,7 +1333,8 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         pak_template = f.read()
     base = os.path.join(out_dir, pak_name)
     write_container(base, cid, chunks, pak_template)
-    rep.out_files = [base + ext for ext in (".utoc", ".ucas", ".pak")]
+    rep.out_files = [base + ext for ext in (".utoc", ".ucas", ".pak")] + \
+        ([base + ".stagegen.json"] if cfg.own_level else [])
     rep.packages = len(new_pkgs)
     progress(0.93, "checking the result")
     rep.checks += verify_wp(base + ".utoc", ws, new_pkgs, payloads, rules,

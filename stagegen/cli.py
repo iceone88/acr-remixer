@@ -47,6 +47,29 @@ BUILD_CUT = CutConfig(max_curvature=1 / 90, max_grade_change=0.05, window_m=16.0
                       min_len=200.0, max_len=700.0, anchor_ends=True)
 
 
+def _pretty(level: str) -> str:
+    """WalesS4HafrenSouth -> Hafren South"""
+    import re
+    m = re.match(r"[A-Z][a-z]+(?:[A-Z][a-z]+)?S\d+(.*)$", level)
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", m.group(1) if m and m.group(1) else level)
+
+
+def _own_name(a) -> str:
+    """Level name of a generated stage: unique per source, seed and length; it
+    must not end in digits (FNames store a trailing _N as a number) and must
+    not contain the source level name (that gets renamed)."""
+    import re
+    m = re.match(r"[A-Z][a-z]+(?:[A-Z][a-z]+)?S\d+(.*)$", a.level)
+    short = m.group(1) if m and m.group(1) else re.sub(r"\d", "", a.level)
+    return f"SG{a.seed}L{int(a.length)}{short}"
+
+
+def _out_dir(a) -> str:
+    if getattr(a, "override", False):
+        return os.path.join(a.out, f"{a.level}_seed{a.seed}")
+    return os.path.join(a.out, f"{a.level}_seed{a.seed}_{int(a.length)}m")
+
+
 def _build_wp(a, paks: str) -> int:
     """Base-game World Partition level: tile-aligned recombination."""
     from .build import writers as W
@@ -84,7 +107,7 @@ def _build_wp(a, paks: str) -> int:
     order = " ".join(p.segment_id.split("#")[1] + ("r" if p.reversed else "") for p in layout.pieces)
     print(f"layout {layout.length/1000:.2f} km in {time.time()-t:.1f}s: pieces {order}, "
           f"kinks {', '.join(f'{k:+.0f}' for k in best.kinks)} deg, {len(layout.pacenotes)} calls")
-    out = os.path.join(a.out, f"{a.level}_seed{a.seed}")
+    out = _out_dir(a)
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "layout.json"), "w") as f:
         f.write(to_json(layout, {"seed": a.seed, "source": "game", "level": a.level}))
@@ -95,6 +118,10 @@ def _build_wp(a, paks: str) -> int:
     from .build.wp import WPConfig
     cfg = WPConfig(debug_spawn_s=a.spawn_at, debug_no_clip=a.no_clip, debug_offset_zero=a.offset_zero,
                    debug_offset=None if a.offset is None else tuple(float(v) for v in a.offset.split(',')))
+    if not getattr(a, "override", False):
+        # its own level and menu entry next to the original stage
+        cfg.own_level = _own_name(a)
+        cfg.display_name = f"{_pretty(a.level)} · seed {a.seed} · {layout.length / 1000:.1f} km"
     if getattr(a, "no_forest", False):
         cfg.forest = "hide"
     if getattr(a, "no_grass", False):
@@ -151,7 +178,7 @@ def _build(a) -> int:
         from .progress import progress
         progress(1.0, "installing into the game")
         _stop_game()
-        a.build_dir = os.path.join(a.out, f"{a.level}_seed{a.seed}")
+        a.build_dir = _out_dir(a)
         rc = _install(a)
         if rc == 0 and a.launch:
             os.startfile("steam://rungameid/3917090")
@@ -220,25 +247,54 @@ def _install(a) -> int:
         print(f"no built container in {a.build_dir}")
         return 1
     mods = _mods_dir(a.paks)
-    _uninstall(a, quiet=True)
     base = src[0][:-5]
-    for ext in (".utoc", ".ucas", ".pak"):
-        shutil.copy2(base + ext, mods)
-        print("installed", os.path.join(mods, os.path.basename(base + ext)))
+    name = os.path.basename(base)
+    # replace an earlier install of the same stage (same container name)
+    for p in glob.glob(os.path.join(mods, name + ".*")):
+        os.remove(p)
+    for ext in (".utoc", ".ucas", ".pak", ".stagegen.json"):
+        if os.path.exists(base + ext):
+            shutil.copy2(base + ext, mods)
+            print("installed", os.path.join(mods, name + ext))
+    return _refresh_tables(a)
+
+
+def _refresh_tables(a) -> int:
+    from .build.tables import write_tables_container
+    from .extract.real import DEFAULT_PAKS
+    for n in write_tables_container(os.path.normpath(a.paks or DEFAULT_PAKS)):
+        print("menu:", n)
     return 0
+
+
+def installed_stages(paks: str | None) -> list[str]:
+    """Container names of installed generated stages (without the menu tables)."""
+    import glob
+    from .build.tables import TABLES_PAK
+    return sorted(os.path.basename(p)[:-5] for p in glob.glob(os.path.join(_mods_dir(paks), "*_Stagegen_9_P.utoc"))
+                  if os.path.basename(p)[:-5] != TABLES_PAK)
 
 
 def _uninstall(a, quiet: bool = False) -> int:
+    """Remove one installed stage (a.stage: level name or container name) or all."""
     import glob
+    from .build.tables import TABLES_PAK
+    want = getattr(a, "stage", None)
     removed = 0
-    for p in glob.glob(os.path.join(_mods_dir(a.paks), "*_Stagegen_9_P.*")):
-        os.remove(p)
-        removed += 1
-        if not quiet:
-            print("removed", p)
+    for name in installed_stages(a.paks):
+        if want and want not in (name, name.removeprefix("pakchunk99-").removesuffix("_Stagegen_9_P")):
+            continue
+        for p in glob.glob(os.path.join(_mods_dir(a.paks), name + ".*")):
+            os.remove(p)
+            removed += 1
+            if not quiet:
+                print("removed", p)
+    if not want:
+        for p in glob.glob(os.path.join(_mods_dir(a.paks), TABLES_PAK + ".*")):
+            os.remove(p)
     if not quiet and not removed:
         print("nothing to remove")
-    return 0
+    return _refresh_tables(a) if want else 0
 
 
 def main(argv=None):
@@ -277,14 +333,27 @@ def main(argv=None):
     ins = sub.add_parser("install", help="copy a built stage container into acr/Content/Paks/~mods")
     ins.add_argument("build_dir", help="folder written by `build`, e.g. out/WrcgEsSS1_seed0")
     ins.add_argument("--paks")
-    uni = sub.add_parser("uninstall", help="remove installed stagegen containers (restores the original stage)")
+    uni = sub.add_parser("uninstall", help="remove installed generated stages (all, or --stage NAME)")
     uni.add_argument("--paks")
+    uni.add_argument("--stage", help="level name of one installed stage, e.g. SG1L4500HafrenSouth")
+    lsi = sub.add_parser("installed", help="list installed generated stages")
+    lsi.add_argument("--paks")
+    b.add_argument("--override", action="store_true",
+                   help="replace the original stage instead of adding a new one (old behaviour)")
     a = ap.parse_args(argv)
     if a.cmd == "install":
         return _install(a)
     if a.cmd == "uninstall":
         _stop_game()
         return _uninstall(a)
+    if a.cmd == "installed":
+        import json
+        for name in installed_stages(a.paks):
+            meta = os.path.join(_mods_dir(a.paks), name + ".stagegen.json")
+            info = json.load(open(meta, encoding="utf-8")) if os.path.exists(meta) else {}
+            print(name.removeprefix("pakchunk99-").removesuffix("_Stagegen_9_P"), "|",
+                  info.get("display", "replaces the original stage"))
+        return 0
 
     if a.cmd == "list":
         return _list(a)

@@ -19,8 +19,11 @@ from .zen_write import rewrite_package
 
 
 def _fstring(s: str) -> bytes:
-    b = s.encode("ascii", "replace") + b"\0"
-    return struct.pack("<i", len(b)) + b
+    if s.isascii():
+        b = s.encode("ascii") + b"\0"
+        return struct.pack("<i", len(b)) + b
+    b = s.encode("utf-16-le") + b"\0\0"              # negative length = UTF-16 characters
+    return struct.pack("<i", -(len(b) // 2)) + b
 
 
 class Table:
@@ -216,13 +219,32 @@ T_VARIANTS = DB + "TrackSelection/DT_TracksVariants.uasset"
 T_LOCATIONS = DB + "TrackSelection/DT_TracksLocations.uasset"
 
 
-def stage_entries(fs, level: str, new: str, display: str, length_km: float) -> tuple[dict, list[str]]:
+TABLES_PAK = "pakchunk99-Tables_Stagegen_9_P"      # "_Stagegen_": never read back as source data
+STAGE_META = ".stagegen.json"                      # next to an own-level container: {level, name, display, ...}
+
+
+def build_tables(fs, stages: list[dict]) -> tuple[dict, list[str]]:
+    """Menu rows for several generated stages ({level, name, display}) on
+    top of the tables in `fs` (which should include other mods, e.g. WRCG,
+    but not stagegen containers). Returns ({table path: package bytes}, notes)."""
+    tabs = {p: Table(Package(fs.read(p))) for p in (T_LEVELS, T_TRACKS, T_VARIANTS, T_LOCATIONS)}
+    notes = []
+    for s in stages:
+        notes += _add_stage(tabs[T_LEVELS], tabs[T_TRACKS], tabs[T_VARIANTS], tabs[T_LOCATIONS],
+                            s["level"], s["name"], s["display"])
+    return {p: t.build() for p, t in tabs.items()}, notes
+
+
+def stage_entries(fs, level: str, new: str, display: str, length_km: float = 0) -> tuple[dict, list[str]]:
+    """Rows for one generated stage (see build_tables)."""
+    return build_tables(fs, [{"level": level, "name": new, "display": display}])
+
+
+def _add_stage(lv: Table, tr: Table, va: Table, lo: Table, level: str, new: str, display: str) -> list[str]:
     """Rows for a generated stage /Game/Levels/<new> made from <level>:
     DT_Levels, DT_Tracks, DT_TracksVariants (full forward + reverse) and the
-    location's track list. `fs` should include installed mods so their rows
-    survive. Returns ({table path: package bytes}, notes)."""
+    location's track list."""
     notes = []
-    lv = Table(Package(fs.read(T_LEVELS)))
     lvl_path = f"/Game/Levels/{level}"
     lv_key = next((n for n, r in lv.rows if struct.unpack_from("<i", r, 10)[0] == lv.names.index(lvl_path)), None) \
         if lvl_path in lv.names else None
@@ -230,7 +252,6 @@ def stage_entries(fs, level: str, new: str, display: str, length_km: float) -> t
         raise ValueError(f"no DT_Levels row for {lvl_path}")
     lv.copy_row(lv_key, new, {lvl_path: f"/Game/Levels/{new}", level: new})
 
-    tr = Table(Package(fs.read(T_TRACKS)))
     tr_key = next(n for n, r in tr.rows if lv_key in tr.handles(r, "Levels"))
     src_row = tr.row(tr_key)
     variants = tr.handles(src_row, "TracksVariants")
@@ -238,23 +259,58 @@ def stage_entries(fs, level: str, new: str, display: str, length_km: float) -> t
     rev = next(v for v in variants if v.endswith("FullReverse"))
     loc_key = tr.handles(src_row, "TracksLocations")[0]
 
-    va = Table(Package(fs.read(T_VARIANTS)))
     for src_v, suffix, label in ((fwd, "FullForward", "Forward"), (rev, "FullReverse", "Reverse")):
         row = va.copy_row(src_v, new + suffix, {tr_key: new})
         va.replace_texts(row, [(f"STAGEGEN_{new}_{suffix}_SHORT", f"{display} ({label})"),
                                (f"STAGEGEN_{new}_{suffix}", f"{display} ({label})")])
-        try:
-            old_len = round(struct.unpack_from("<f", row, bytes(row).find(b"\x9a\x99\x99\x40"))[0], 1) \
-                if b"\x9a\x99\x99\x40" in bytes(row) else None
-        except struct.error:
-            old_len = None
         notes.append(f"variant {new + suffix} from {src_v}")
 
     row = tr.copy_row(tr_key, new, {lv_key: new, fwd: new + "FullForward", rev: new + "FullReverse"})
     tr.keep_handles(row, "TracksVariants", {new + "FullForward", new + "FullReverse"})
     tr.replace_texts(row, [(f"STAGEGEN_{new}", display)])
 
-    lo = Table(Package(fs.read(T_LOCATIONS)))
     lo.append_handle(lo.row(loc_key), "Tracks", new, tr_key)
     notes.append(f"track {new} ({display}) under location {loc_key}, level key {new}, from {tr_key}")
-    return {T_LEVELS: lv.build(), T_TRACKS: tr.build(), T_VARIANTS: va.build(), T_LOCATIONS: lo.build()}, notes
+    return notes
+
+
+def write_tables_container(paks_dir: str) -> list[str]:
+    """(Re)write the shared menu-table container in ~mods from every
+    installed own-level stage (its STAGE_META file); removed if none."""
+    import glob
+    import json
+    import os
+    from ..extract.iostore import GameFS
+    from . import container_header as CH
+    from .cityhash import name_hash
+    from .iostore_write import ChunkIn, container_header_chunk_id, write_container
+    mods = os.path.join(paks_dir, "~mods")
+    base = os.path.join(mods, TABLES_PAK)
+    for ext in (".utoc", ".ucas", ".pak"):
+        if os.path.exists(base + ext):
+            os.remove(base + ext)
+    stages = []
+    for p in sorted(glob.glob(os.path.join(mods, "*" + STAGE_META))):
+        if os.path.exists(p[:-len(STAGE_META)] + ".utoc"):
+            with open(p, encoding="utf-8") as f:
+                stages.append(json.load(f))
+    if not stages:
+        return ["no generated stages installed: menu tables removed"]
+    fs = GameFS(paks_dir, include_mods=True)
+    tbl, notes = build_tables(fs, stages)
+    cid = name_hash(TABLES_PAK)
+    chunks, entries, headers = [], {}, {}
+    for path, data in tbl.items():
+        c, i = fs.index[path]
+        if id(c) not in headers:
+            h_i = next(k for k, x in enumerate(c.chunk_ids) if x[11] == 6)
+            headers[id(c)] = CH.parse(c.read_entry(h_i))
+        pid = struct.unpack_from("<Q", c.chunk_ids[i], 0)[0]
+        orig = headers[id(c)].entries.get(pid, CH.StoreEntry())
+        entries[pid] = CH.StoreEntry([CH.package_id(n) for n in Package(data).imported_package_names()],
+                                     orig.shader_maps)
+        chunks.append(ChunkIn(c.chunk_ids[i], data, path))
+    chunks.append(ChunkIn(container_header_chunk_id(cid), CH.build(CH.ContainerHeader(cid, entries))))
+    with open(os.path.join(os.path.dirname(__file__), "empty_mod.pak"), "rb") as f:
+        write_container(base, cid, chunks, f.read())
+    return notes

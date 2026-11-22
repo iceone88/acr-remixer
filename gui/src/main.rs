@@ -106,13 +106,36 @@ impl Default for Prefs {
     }
 }
 
-/// The generated stage currently installed in the game's ~mods folder (level name).
-fn installed_stage(acr_dir: &str) -> Option<String> {
+/// A generated stage installed in the game's ~mods folder.
+#[derive(Clone)]
+struct Installed {
+    /// level name (what `uninstall --stage` takes)
+    name: String,
+    /// menu name; None for an old build that replaces the original stage
+    display: Option<String>,
+}
+
+/// Generated stages installed in ~mods (the shared menu-table container excluded).
+fn installed_stages(acr_dir: &str) -> Vec<Installed> {
     let mods = PathBuf::from(acr_dir).join(r"acr\Content\Paks\~mods");
-    std::fs::read_dir(mods).ok()?.filter_map(|e| e.ok()).find_map(|e| {
+    let Ok(rd) = std::fs::read_dir(&mods) else { return vec![] };
+    let mut v: Vec<Installed> = rd.filter_map(|e| e.ok()).filter_map(|e| {
         let n = e.file_name().to_string_lossy().into_owned();
-        n.strip_prefix("pakchunk99-")?.strip_suffix("_Stagegen_9_P.utoc").map(|s| s.to_string())
-    })
+        let name = n.strip_prefix("pakchunk99-")?.strip_suffix("_Stagegen_9_P.utoc")?.to_string();
+        if name == "Tables" { return None; }
+        let meta = mods.join(format!("pakchunk99-{name}_Stagegen_9_P.stagegen.json"));
+        let display = std::fs::read_to_string(meta).ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|j| j["display"].as_str().map(|s| s.to_string()));
+        Some(Installed { name, display })
+    }).collect();
+    v.sort_by(|a, b| a.name.cmp(&b.name));
+    v
+}
+
+/// Output folder of a build (matches the backend's naming).
+fn build_dir(out_dir: &str, stage: &str, seed: u32, length_m: f32) -> PathBuf {
+    PathBuf::from(out_dir).join(format!("{stage}_seed{seed}_{:.0}m", length_m))
 }
 
 const FW_RULE: &str = "acr-stagegen: block ACR online";
@@ -293,7 +316,7 @@ struct App {
     preview: Option<Preview>,
     tab: Tab,
     /// generated stage in ~mods, firewall block present (refreshed on events)
-    installed: Option<String>,
+    installed: Vec<Installed>,
     blocked: bool,
     /// share-code text field (paste a code here to load it)
     code_input: String,
@@ -310,14 +333,14 @@ impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
         let mut app = App { prefs, log: String::new(), job: None, preview: None, tab: Tab::Map,
-                            installed: None, blocked: false, code_input: String::new() };
+                            installed: vec![], blocked: false, code_input: String::new() };
         app.preview = load_preview(&app.out_for(app.prefs.seed)).ok();     // reopen the last stage
         app.refresh_install_state();
         app
     }
 
     fn out_for(&self, seed: u32) -> PathBuf {
-        PathBuf::from(&self.prefs.out_dir).join(format!("{}_seed{}", self.prefs.stage, seed))
+        build_dir(&self.prefs.out_dir, &self.prefs.stage, seed, self.prefs.length_m)
     }
 
     fn start(&mut self) {
@@ -349,12 +372,13 @@ impl App {
         if !p.forest { args.push("--no-forest".into()); }
         if !p.grass { args.push("--no-grass".into()); }
         if !p.foliage { args.push("--no-foliage".into()); }
-        if last && p.install { args.push("--install".into()); }
+        // every stage of a batch is installed (each gets its own menu entry); ACR starts after the last
+        if p.install { args.push("--install".into()); }
         if last && p.install && p.launch { args.push("--launch".into()); }
         let paks = PathBuf::from(&p.acr_dir).join(r"acr\Content\Paks");
         args.push("--paks".into());
         args.push(paks.display().to_string());
-        let out = PathBuf::from(&p.out_dir).join(format!("{}_seed{}", p.stage, seed));
+        let out = build_dir(&p.out_dir, &p.stage, seed, p.length_m);
         let (tx, rx) = channel();
         job.rx = rx;
         job.progress = 0.0;
@@ -373,7 +397,7 @@ impl App {
     }
 
     fn refresh_install_state(&mut self) {
-        self.installed = installed_stage(&self.prefs.acr_dir);
+        self.installed = installed_stages(&self.prefs.acr_dir);
         self.blocked = fw_blocked();
     }
 
@@ -381,7 +405,7 @@ impl App {
     /// (if wanted), off otherwise. Asks for admin rights only when it changes.
     fn sync_firewall(&mut self) {
         self.refresh_install_state();
-        let want = self.prefs.block_online && self.installed.is_some();
+        let want = self.prefs.block_online && !self.installed.is_empty();
         if want != self.blocked {
             match fw_set(&self.prefs.acr_dir, want) {
                 Ok(()) => self.log.push_str(if want { "ACR's internet access is blocked while the generated stage is installed.\n" }
@@ -399,8 +423,9 @@ impl App {
         r.push_str(&format!("acr-stagegen bug report\nversion: {VERSION}\nbackend: {}\nwindows: {}\n\n",
             if p.use_python || BACKEND.is_none() { "python (development)" } else { "embedded" }, windows_version()));
         r.push_str(&format!("share code: {}\n", share_code(p)));
-        r.push_str(&format!("installed stage: {}\nonline blocked: {}\n\n",
-            self.installed.as_deref().unwrap_or("none"), self.blocked));
+        let inst: Vec<&str> = self.installed.iter().map(|i| i.name.as_str()).collect();
+        r.push_str(&format!("installed stages: {}\nonline blocked: {}\n\n",
+            if inst.is_empty() { "none".to_string() } else { inst.join(", ") }, self.blocked));
         r.push_str("=== settings ===\n");
         r.push_str(&serde_json::to_string_pretty(p).unwrap_or_default());
         r.push_str("\n\n=== last stage ===\n");
@@ -421,15 +446,18 @@ impl App {
         Ok(path)
     }
 
-    /// Remove installed generated stages from the game (restores the originals).
-    fn uninstall(&mut self) {
+    /// Remove one installed generated stage (by level name) or all of them.
+    fn uninstall(&mut self, stage: Option<String>) {
         let p = self.prefs.clone();
-        self.log.push_str("\n=== uninstall ===\n");
+        self.log.push_str(&format!("\n=== uninstall {} ===\n", stage.as_deref().unwrap_or("all")));
         self.tab = Tab::Log;
         let paks = PathBuf::from(&p.acr_dir).join(r"acr\Content\Paks").display().to_string();
         match backend_cmd(&p) {
             Ok((prog, mut full, cwd)) => {
                 full.extend(["uninstall".to_string(), "--paks".into(), paks]);
+                if let Some(s) = stage {
+                    full.extend(["--stage".to_string(), s]);
+                }
                 let (tx, rx) = channel();
                 self.job = Some(Job { rx, remaining: vec![], total: 1, progress: 0.5, phase: "uninstalling".into() });
                 spawn_build(prog, cwd, full, None, tx);
@@ -550,32 +578,46 @@ impl eframe::App for App {
         }
         let busy = self.job.is_some();
 
-        if let Some(stage) = self.installed.clone() {
-            let mut do_uninstall = false;
+        if !self.installed.is_empty() {
+            let mut do_uninstall: Option<Option<String>> = None;
             let mut do_block = false;
+            let list = self.installed.clone();
             egui::TopBottomPanel::top("installed").show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
+                    let replaces = list.iter().any(|i| i.display.is_none());
                     ui.colored_label(egui::Color32::from_rgb(230, 150, 40),
-                        format!("⚠ Generated stage installed ({stage}): it replaces the original stage. \
-                                 Play offline; times would count for the original."));
+                        if replaces {
+                            "⚠ Generated stages installed (one replaces its original stage). Play offline."
+                        } else {
+                            "Generated stages installed: extra stages in Free Practice under their rally. Play offline."
+                        });
                     if self.blocked {
                         ui.colored_label(egui::Color32::from_rgb(90, 180, 90), "🔒 ACR online blocked");
                     } else if !busy && ui.small_button("Block ACR online").clicked() {
                         do_block = true;
                     }
-                    if !busy && ui.small_button("Uninstall").clicked() {
-                        do_uninstall = true;
+                    if list.len() > 1 && !busy && ui.small_button("Uninstall all").clicked() {
+                        do_uninstall = Some(None);
                     }
                 });
+                for i in &list {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("  • {}", i.display.clone()
+                            .unwrap_or_else(|| format!("{} (replaces the original stage)", i.name))));
+                        if !busy && ui.small_button("Uninstall").clicked() {
+                            do_uninstall = Some(Some(i.name.clone()));
+                        }
+                    });
+                }
                 ui.add_space(4.0);
             });
             if do_block {
                 self.prefs.block_online = true;
                 self.sync_firewall();
             }
-            if do_uninstall {
-                self.uninstall();
+            if let Some(which) = do_uninstall {
+                self.uninstall(which);
             }
         }
 
@@ -666,11 +708,12 @@ impl eframe::App for App {
                 }
             });
             if !busy
-                && ui.add_enabled(ready, egui::Button::new("Uninstall generated stage"))
-                    .on_hover_text("Remove the installed stage from the game (closes ACR); the original stage is back")
+                && !self.installed.is_empty()
+                && ui.add_enabled(ready, egui::Button::new("Uninstall all generated stages"))
+                    .on_hover_text("Remove every generated stage from the game (closes ACR)")
                     .clicked()
             {
-                self.uninstall();
+                self.uninstall(None);
             }
             if !VERIFIED.contains(&self.prefs.stage.as_str()) {
                 ui.colored_label(egui::Color32::from_rgb(230, 170, 60), "Experimental stage: not yet verified in-game.");
