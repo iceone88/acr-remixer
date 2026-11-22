@@ -39,7 +39,7 @@ from .iostore_write import ChunkIn, container_header_chunk_id, retarget_containe
 from .level import decode_components, learn_rules, patched_payload
 from .mesh_clip import clip_mesh_payload, displace_payload, mesh_export_index
 from .wp_hash import all_cells_in_top_level, drop_cells, widen_cell_data
-from .foliage import hide_instances
+from .foliage import hide_instances, move_hism
 from .hlod import mesh_world_bounds, transform_mesh
 from .zen_write import rewrite_package
 
@@ -68,7 +68,9 @@ class WPConfig:
     filler: bool = True                  # backdrop terrain becomes ground under the whole new stage
     filler_below: float = 1.5            # m: filler sits this far below the stage terrain
     bg_clear: float = 2000.0            # m: background (satellite map) mesh hidden this close to the new route
-    hide_foliage: bool = True           # zero-scale the (unmoved) per-cell foliage instances
+    move_forest: bool = True             # PCG forest trees follow the piece owning their spot
+    move_grass: bool = True              # ... and the PCG grass/branches/rocks
+    hide_foliage: bool = True          # zero-scale the (unmoved) per-cell foliage instances
     hide_unused_tiles: bool = True       # tiles the layout does not use would float at the old location
     seam_width: float = 60.0            # m: terrain height blending either side of piece boundaries (0 = off)
     debug_skip_kinds: tuple = ()         # test builds: actor kinds left unmoved
@@ -166,6 +168,8 @@ def _filler_height_field(surf, pieces, tree_new, tree_new_all, seam_dz, new_cl, 
     # the filler mesh is coarse (adaptive, up to ~100 m triangles): keep it under
     # the lowest stage height within erode_m so it does not form shelves in valleys
     E = minimum_filter(F, size=int(2 * erode_m / cell) + 1)
+    # (continuing the edge heights outside the detailed terrain was tried: it
+    # forms overhanging shelves over valleys, worse than the occasional gap)
     Ht = np.minimum(gaussian_filter(E, sigma=3), E)
     GR = np.full_like(G, np.inf)
     rx = np.clip(((Rp[:, 0] - lo[0]) / cell).round().astype(int), 0, len(gx) - 1)
@@ -378,6 +382,28 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     payloads: dict[str, dict[int, bytes]] = collections.defaultdict(dict)
     tile_pivot: dict[tuple, np.ndarray] = {}
 
+    def place_trees(W):
+        """world_m (N,3) source -> (keep, new world, yaw) for forest instances."""
+        k, d, s, _ = assign(W)
+        keep = (k >= 0) & lat_ok(s, d, cfg.terrain_clip)
+        NW = W.copy()
+        yaw = np.zeros(len(W))
+        for kk in np.unique(k[k >= 0]):
+            m_ = k == kk
+            pc = pieces[int(kk)]
+            keep[m_] &= owns(int(kk), W[m_])
+            NW[m_] = W[m_] @ pc.R.T + pc.t
+            NW[m_, 2] += seam_dz(int(kk), NW[m_])
+            yaw[m_] = pc.yaw
+            if int(kk) in surf:                            # only where the piece's terrain is
+                dd, _ = surf[int(kk)][0].query(NW[m_, :2], distance_upper_bound=15.0)
+                keep[np.flatnonzero(m_)] &= np.isfinite(dd)
+        if keep.any():                                     # park hidden ones among the kept (tight bounds)
+            NW[~keep] = NW[keep].mean(0)
+            yaw[~keep] = 0.0
+        return keep, NW, yaw
+
+    forest_nobox = [0]
     for path, pk in pkgs.items():
         ex = pk.exports
         route = ws.route_cells.get(path)
@@ -386,12 +412,14 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             # location they float in the void left by the moved tiles
             for i, e in enumerate(ex):
                 own = ex[e.outer].name if 0 <= e.outer < len(ex) else ""
-                if own.startswith(("InstancedFoliageActor", "PCGGrassContainer")):
+                if own.startswith("InstancedFoliageActor") or (own.startswith("PCGGrassContainer")
+                                                                and not (cfg.move_forest and cfg.move_grass)):
                     nb, nh = hide_instances(pk.export_bytes(e))
                     if nh:
                         payloads[path][i] = nb
                         rep.moved["foliage instances hidden"] += nh
         comps = [c for c in decode_components(pk, rules) if c.root and c.loc is not None]
+        pcg_roots: dict[int, np.ndarray] = {}
         for c in comps:
             owner = ex[c.owner].name if c.owner < len(ex) else ""
             p_m = c.loc / 100
@@ -427,6 +455,9 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                     payloads[path][c.export] = patched_payload(pk, c, loc * 100, rot)
                     rep.moved["backdrop terrain"] += 1
                 continue
+            if c.root and (owner.startswith("PCGPartitionActor")
+                           or (cfg.move_grass and owner.startswith("PCGGrassContainer"))):
+                pcg_roots[c.owner] = c.loc.copy()
             if owner.startswith(SKIP_OWNERS) or any(w in owner for w in SKIP_WORDS):
                 continue
             kind = owner.split("_UAID")[0].rstrip("0123456789_")
@@ -472,6 +503,32 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 loc[2] += seam_dz(k, loc[None])[0]
                 payloads[path][c.export] = patched_payload(pk, c, loc * 100, rot)
                 rep.moved[kind] += 1
+
+        # PCG forest (HISM trees on PCGPartitionActors, positions relative to the
+        # actor root): each tree moves with the piece owning its spot, if that
+        # piece's terrain is under it; the rest are hidden
+        if cfg.move_forest:
+            for i, e in enumerate(ex):
+                if e.outer not in pcg_roots:
+                    continue
+                if ex[e.outer].name.startswith("PCGPartitionActor") and not e.name.startswith(("HISM_", "ISM_")):
+                    continue
+                try:
+                    nb, st = move_hism(pk.export_bytes(e), pcg_roots[e.outer], place_trees)
+                except Exception as ex_:                       # layout not understood: hide instead
+                    nb, _ = hide_instances(pk.export_bytes(e))
+                    rep.checks.append(f"forest {e.name}: hidden ({ex_})")
+                    st = {"n": 0}
+                if st.get("n"):
+                    payloads[path][i] = nb
+                    rep.moved["forest trees"] += st["kept"]
+                    rep.moved["forest trees hidden"] += st["n"] - st["kept"]
+                    if st.get("boxes", 0) == 0:
+                        forest_nobox[0] += 1
+
+    if cfg.move_forest:
+        rep.checks.append(f"forest: {rep.moved['forest trees']} trees moved, {rep.moved['forest trees hidden']} "
+                          f"hidden; {forest_nobox[0]} components without cached bounds found")
 
     # ---- route splines (per variant direction)
     ctrl = resample(new_cl, cfg.ctrl_spacing)
@@ -842,15 +899,24 @@ def verify_wp(utoc: str, ws: WPSource, new_pkgs: dict, payloads: dict, rules) ->
     c = Container(utoc)
     bad = 0
     n_patched = 0
+    bad_names = collections.Counter()
     for path, pl in payloads.items():
         pk = Package(c.read(path))
         comps = {cc.export for cc in decode_components(pk, rules)}
         want = [i for i in pl if pk.exports[i].name not in SPLINES
                 and not pk.exports[i].name.startswith(("WorldPartitionRuntimeSpatialHash",
-                                                       "WorldPartitionRuntimeCellData", "StaticMesh_"))]
+                                                       "WorldPartitionRuntimeCellData", "StaticMesh_",
+                                                       "HISM_", "ISM_"))      # instance data, no transform
+                and not (0 <= pk.exports[i].outer < len(pk.exports) and pk.exports[pk.exports[i].outer].name.startswith(
+                    ("InstancedFoliageActor", "PCGGrassContainer", "PCGPartitionActor")))]
         n_patched += len(want)
         bad += sum(i not in comps for i in want)
-    out.append(f"level: {n_patched} patched components in {len(payloads)} packages, {bad} fail to re-decode")
+        bad_names.update(re.sub(r"(_UAID_\w+|_\d+)+$", "", pk.exports[i].name) + " < " +
+                         re.sub(r"(_UAID_\w+|_\d+)+$", "", pk.exports[pk.exports[i].outer].name
+                                if 0 <= pk.exports[i].outer < len(pk.exports) else "-")
+                         for i in want if i not in comps)
+    out.append(f"level: {n_patched} patched components in {len(payloads)} packages, {bad} fail to re-decode"
+               + (f" ({', '.join(f'{k} x{v}' for k, v in bad_names.most_common(5))})" if bad else ""))
     for path, kind in ws.route_cells.items():
         if kind == "cut":
             continue
