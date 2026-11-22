@@ -101,7 +101,8 @@ local function step()
     elseif state == "move" then
         i = i + 1
         if i > #points then
-            if debug_cam_active() then console("ToggleDebugCamera") end
+            -- the debug camera does not give the car back reliably (toggling,
+            -- DisableDebugCamera: no effect), so it stays on; tests restart the game
             print("[StageTest] done\n")
             done = true
             return

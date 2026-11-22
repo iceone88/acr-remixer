@@ -44,20 +44,26 @@ def main():
     ap.add_argument("--build", required=True)
     ap.add_argument("--every", type=float, default=250)
     ap.add_argument("--drive", action="store_true", help="autopilot drive-through instead of the camera tour")
+    ap.add_argument("--stop-at-fp", action="store_true", help="stop on the Free Practice screen (menu mapping)")
+    ap.add_argument("--from-fp", action="store_true", help="game already on the Free Practice screen: just run")
     a = ap.parse_args()
     import vgamepad as vg
     from acr_harness import BUTTONS, focus, kill
     py = sys.executable
 
     # close ACR, install the stage, write the tour points (the mod reads them on entering the car), launch
-    kill()
-    subprocess.run([py, "-m", "stagegen.cli", "install", a.build], cwd=os.path.join(HERE, ".."), check=True)
+    if not a.from_fp:
+        kill()
+        subprocess.run([py, "-m", "stagegen.cli", "install", a.build], cwd=os.path.join(HERE, ".."), check=True)
     subprocess.run([py, os.path.join(HERE, "acr_shots.py"), "--build", a.build, "--every", str(a.every), "--prepare"],
                    check=True)
-    if os.path.exists(UI):
-        os.remove(UI)
-    os.startfile("steam://rungameid/3917090")
+    if not a.from_fp:
+        if os.path.exists(UI):
+            os.remove(UI)
+        os.startfile("steam://rungameid/3917090")
     pad = vg.VX360Gamepad()
+    if a.from_fp:
+        time.sleep(3)                                    # the game ignores a freshly connected pad briefly
 
     def press(name, n=1):
         focus()
@@ -67,6 +73,8 @@ def main():
             pad.release_button(button=b); pad.update(); time.sleep(0.8)
 
     title = lambda s: "WB_SplashScreen_C" in s.split(",")      # 'press any button' (not the logo intro)
+    if a.from_fp:
+        return after_fp(a, py, press, pad, ui())
     s = wait_ui(title, 300, "title screen")
     print("title:", s, flush=True)
     t0 = time.time()
@@ -93,6 +101,15 @@ def main():
     if fp is None:
         raise SystemExit("could not reach free practice")
     print("free practice:", fp, flush=True)
+    if a.stop_at_fp:
+        return
+    return after_fp(a, py, press, pad, fp)
+
+
+def after_fp(a, py, press, pad, fp):
+    """From the Free Practice screen (cursor on Change Rally Stage): start the
+    session, get into the car, drive off the line, run the tour."""
+    from acr_harness import focus
     time.sleep(2)
     press("DOWN", 2); press("A")                         # Start Session
     t0 = time.time()
@@ -109,18 +126,17 @@ def main():
     phys = mmap.mmap(-1, 1024, "Local\\acpmf_physics", access=mmap.ACCESS_READ)
     speed = lambda: struct.unpack_from("<f", phys, 28)[0]          # km/h
     gear = lambda: struct.unpack_from("<i", phys, 16)[0]           # 0 R, 1 N, 2 1st
+    # a short fixed burst: the shared-memory telemetry is sometimes stale (speed
+    # stays 0), and "throttle until moving" then drove the car into the trees
     time.sleep(6)
-    t0 = time.time()
-    while speed() < 15 and time.time() - t0 < 40:
-        if gear() < 2:
-            press("A")                                             # manual gearbox: up into 1st
-        focus()
-        pad.right_trigger_float(value_float=0.6); pad.update()
-        time.sleep(1)
+    press("A")                                                     # manual gearbox: up into 1st
+    focus()
+    pad.right_trigger_float(value_float=0.5); pad.update()
+    time.sleep(2.0)
     pad.right_trigger_float(value_float=0.0); pad.left_trigger_float(value_float=1.0); pad.update()
     time.sleep(3)
     pad.left_trigger_float(value_float=0.0); pad.update()
-    print(f"drove off ({speed():.0f} km/h now)", flush=True)
+    print(f"drove off (telemetry: {speed():.0f} km/h, gear {gear()})", flush=True)
     del pad
     if a.drive:                                          # autopilot drive-through instead of the camera tour
         import glob

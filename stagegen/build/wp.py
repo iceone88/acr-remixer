@@ -735,6 +735,24 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 & owns(bd_piece, w_m))
 
     progress(0.76, "shaping the ground")
+    unc_s = s_all[unc_ext]
+
+    def bd_weight(src_m):
+        """1 where the backdrop *is* the stage (route stretches without track
+        tiles, e.g. start areas): keep its exact heights there; fades to 0 (pure
+        filler) within 60 m along the route."""
+        if bd_piece is None or not len(unc_s):
+            return np.zeros(len(src_m))
+        d, idx = assign.tree.query(src_m[:, :2])
+        s = idx * step
+        j = np.clip(np.searchsorted(unc_s, s), 1, len(unc_s) - 1)
+        ds = np.minimum(np.abs(s - unc_s[j - 1]), np.abs(s - unc_s[j]))
+        pc0 = pieces[bd_piece]
+        w = np.clip(1.0 - ds / 60.0, 0.0, 1.0) * ((s >= pc0.sa - 40) & (s <= pc0.sb + 40))
+        if w.any():
+            w = w * owns(bd_piece, src_m)
+        return w
+
     filler_h = None
     if cfg.filler:
         filler_h = _filler_height_field(
@@ -756,7 +774,8 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 if bd_piece is not None:
                     pc0 = pieces[bd_piece]
                     xy = (src @ pc0.R.T + pc0.t)[:, :2]
-                    return (filler_h(xy) - pc0.t[2]) * 100 - pv[2] - P[:, 2]
+                    dz = (filler_h(xy) - pc0.t[2]) * 100 - pv[2] - P[:, 2]
+                    return (1.0 - bd_weight(src)) * dz          # start/finish areas keep their ground
                 return filler_h(src[:, :2] + filler_shift) * 100 - pv[2] - P[:, 2]
             nb, mx = displace_payload(mpk.export_bytes(mpk.exports[mi]), to_h)
             new_pkgs[p] = rewrite_package(mpk, {mi: nb})
@@ -800,11 +819,12 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         elif re.search(rb"Terrain\d{4}", m.soft_sub):
             if filler_h is not None:
                 V = U.astype(np.float64).copy()
+                w_bd = bd_weight(V)
                 if bd_piece is not None:
                     V = V @ pieces[bd_piece].R.T + pieces[bd_piece].t
                 else:
                     V[:, :2] += filler_shift
-                V[:, 2] = filler_h(V[:, :2])
+                V[:, 2] = w_bd * V[:, 2] + (1.0 - w_bd) * filler_h(V[:, :2])
                 out_meshes.append(W.MeshOut(V[:, [0, 2, 1]], m.indices.astype(np.uint32), m.material_ref, m.soft_pkg,
                                             m.soft_asset, m.soft_sub, m.extra, m.group))
                 rep.baked_tris += len(tri)
@@ -831,6 +851,28 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                                         m.soft_asset, m.soft_sub, m.extra, m.group))
             rep.baked_tris += len(sel)
     rep.baked_meshes = len(out_meshes)
+    # drivability: collision under the route must sit just below the route line
+    # (catches lowered/missing ground, e.g. a start area on reshaped terrain)
+    gv = np.vstack([mo.vertices[:, [0, 2, 1]] for mo in out_meshes if len(mo.vertices)])
+    gtree = cKDTree(gv[:, :2])
+    rp = resample(new_cl, 10.0)
+    bad_s = []
+    for k_r, p_r in enumerate(rp):
+        ii = gtree.query_ball_point(p_r[:2], 4.0)
+        z = gv[ii, 2] if ii else np.empty(0)
+        z = z[z <= p_r[2] + 1.5]
+        if not len(z) or p_r[2] - z.max() > 2.0:
+            bad_s.append(k_r * 10.0)
+    if bad_s:
+        runs, a0 = [], bad_s[0]
+        for x0, x1 in zip(bad_s, bad_s[1:] + [None]):
+            if x1 is None or x1 - x0 > 10.0:
+                runs.append((a0, x0)); a0 = x1
+        rep.checks.append("DRIVABILITY: no ground at the road surface at " +
+                          ", ".join(f"{r0:.0f}-{r1:.0f} m" for r0, r1 in runs[:8]) +
+                          (" ..." if len(runs) > 8 else ""))
+    else:
+        rep.checks.append("drivability: ground at the road surface along the whole route")
     # seams: where terrain of two pieces meets at different heights (shows as
     # floating sheets, the lower side is culled from below)
     seam_pts = collections.defaultdict(list)
