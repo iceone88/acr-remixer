@@ -143,6 +143,11 @@ class TileSearchConfig:
     max_len: float = 1400.0
     max_kink_deg: float = 15.0
     max_grade_mismatch: float = 0.06
+    # joins are smoothed by shearing both sides (stagegen/joins.py): larger kinks
+    # and grade steps become gentle bends; 0 = off (rigid joins as before)
+    smooth_kink_deg: float = 45.0
+    smooth_grade: float = 0.12
+    smooth_reach: float = 120.0    # m either side of a join (at most 40 % of the piece)
     max_width_mismatch: float = 2.0
     clearance: float = 95.0        # min distance between roads of non-adjacent pieces (m)
     beam_width: int = 128
@@ -175,6 +180,8 @@ class TState:
     penalty: float
     kinks: list = field(default_factory=list)
     layer: int = 0                 # 0 = the tiles' original cells, k = their k-th copy
+    entry_heading: float = 0.0     # world heading of the road where the piece starts
+    entry_grade: float = 0.0
     ltiles: tuple = ()             # per layer: tiles used in it
     lspans: tuple = ()             # per layer: source (s0, s1) spans used in it
 
@@ -217,6 +224,54 @@ def _too_close(st: TState, new_xy: np.ndarray, cfg: TileSearchConfig) -> bool:
     return False
 
 
+def h_in_of(ent: Cut, rev: bool) -> float:
+    """Source heading of the road entering a piece at cut `ent`."""
+    return ent.heading + (np.pi if rev else 0.0)
+
+
+def join_shears(best: TState, cfg: TileSearchConfig) -> tuple[list[list], dict]:
+    """Per piece (in order): the shears smoothing its joins (stagegen/joins.py),
+    in the layout frame; and {join index k (piece k-1 -> k): reach m} of the
+    smoothed joins. Joins that are already smooth are left rigid."""
+    from .joins import join_shears as _js
+    states = list(reversed(list(best.chain())))
+    out = [[] for _ in states]
+    smoothed = {}
+    if cfg.smooth_kink_deg <= 0:
+        return out, smoothed
+    for k in range(1, len(states)):
+        a, b = states[k - 1], states[k]
+        kink = abs(np.degrees(wrap_angle(b.entry_heading - a.exit_heading)))
+        dg = abs(b.entry_grade - a.exit_grade)
+        if kink < 3.0 and dg < 0.02:
+            continue                                   # already smooth
+        D_a = min(cfg.smooth_reach, 0.4 * a.rng.seg.length)
+        D_b = min(cfg.smooth_reach, 0.4 * b.rng.seg.length)
+        sa, sb = _js(a.exit_p, a.exit_line, a.exit_heading, b.entry_heading, a.exit_grade, b.entry_grade,
+                     D_a, D_b, max_kink_deg=180.0)
+        if sa is not None:
+            out[k - 1].append(sa)
+            out[k].append(sb)
+            smoothed[k] = max(D_a, D_b)
+    return out, smoothed
+
+
+def apply_shears(P: np.ndarray, shears: list) -> np.ndarray:
+    for sh in shears:
+        P = sh.apply(P)
+    return P
+
+
+def smooth_layout_points(best: TState, cfg: TileSearchConfig) -> tuple[list[list], dict]:
+    """Apply the join shears to the pieces' route points (in place, before the
+    layout is built); returns (shears per piece for the build, smoothed joins)."""
+    shears, smoothed = join_shears(best, cfg)
+    for st, sh in zip(reversed(list(best.chain())), shears):
+        if sh:
+            st.piece.points = apply_shears(st.piece.points, sh)
+    return shears, smoothed
+
+
 def _place(rng: Range, rev: bool, cuts: list[Cut], st: TState, cfg: TileSearchConfig):
     ent = cuts[rng.b] if rev else cuts[rng.a]
     ext = cuts[rng.a] if rev else cuts[rng.b]
@@ -228,7 +283,7 @@ def _place(rng: Range, rev: bool, cuts: list[Cut], st: TState, cfg: TileSearchCo
         if best is None or abs(kink) < abs(best[1]):
             best = (yaw, kink)
     yaw, kink = best
-    if abs(np.degrees(kink)) > cfg.max_kink_deg:
+    if abs(np.degrees(kink)) > max(cfg.max_kink_deg, cfg.smooth_kink_deg):
         return None
     R = rot_z(yaw)
     trans = st.exit_p - R @ ent.p
@@ -322,9 +377,9 @@ def sequence_state(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg
             loose = TileSearchConfig(**{**cfg.__dict__, "max_kink_deg": 180.0})
             placed = _place(r, rev, cuts, st, loose)
             warns.append(f"{a}-{b}{'r' if rev else ''}: kink {abs(np.degrees(placed[3])):.0f} deg at the join "
-                         f"(limit {cfg.max_kink_deg:.0f})")
+                         f"(smoothed up to {max(cfg.max_kink_deg, cfg.smooth_kink_deg):.0f}; this one stays sharp)")
         pts, yaw, trans, kink, g_in, ent, ext = placed
-        if abs(g_in - st.exit_grade) > cfg.max_grade_mismatch:
+        if abs(g_in - st.exit_grade) > max(cfg.max_grade_mismatch, cfg.smooth_grade):
             warns.append(f"{a}-{b}{'r' if rev else ''}: gradient step {abs(g_in - st.exit_grade) * 100:.0f} % at the join")
         if abs(ent.width - st.exit_width) > cfg.max_width_mismatch:
             warns.append(f"{a}-{b}{'r' if rev else ''}: road width step {abs(ent.width - st.exit_width):.1f} m")
@@ -339,6 +394,8 @@ def sequence_state(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg
                      ext.line + yaw, h_out, -ext.grade if rev else ext.grade, ext.width, st.length + r.seg.length,
                      st.tiles | r.tiles, cxy, 0.0, st.kinks + [float(np.degrees(kink))], layer)
         kid.ltiles, kid.lspans = _with_layer(st, layer, r, cuts)
+        kid.entry_heading = float(ent.heading + (np.pi if rev else 0.0) + yaw)
+        kid.entry_grade = float(g_in)
         st = kid
     return st, warns
 
@@ -402,7 +459,7 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
                     if placed is None:
                         continue
                     pts, yaw, trans, kink, g_in, ent, ext = placed
-                    if abs(g_in - st.exit_grade) > cfg.max_grade_mismatch:
+                    if abs(g_in - st.exit_grade) > max(cfg.max_grade_mismatch, cfg.smooth_grade):
                         continue
                     if abs(ent.width - st.exit_width) > cfg.max_width_mismatch:
                         continue
@@ -415,7 +472,8 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
                         continue
                     R = rot_z(yaw)
                     follows = (rev == st.piece.reversed) and (r.b if rev else r.a) == st.exit
-                    pen = (st.penalty + abs(np.degrees(kink)) * 0.8
+                    kd = abs(np.degrees(kink))           # smoothed kinks cost more than small ones
+                    pen = (st.penalty + kd * 0.8 + max(0.0, kd - cfg.max_kink_deg) * 0.8
                            + 30 * abs(g_in - st.exit_grade) / cfg.max_grade_mismatch
                            + (cfg.novelty if follows else 0) + bias[r.id] + cfg.repeat_penalty * layer)
                     h_out = ext.heading + (np.pi if rev else 0.0) + yaw
@@ -425,6 +483,8 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
                                  ext.line + yaw, h_out, -ext.grade if rev else ext.grade, ext.width, L,
                                  st.tiles | r.tiles, cxy, pen, st.kinks + [float(np.degrees(kink))], layer)
                     kid.ltiles, kid.lspans = _with_layer(st, layer, r, cuts)
+                    kid.entry_heading = float(h_in_of(ent, rev) + yaw)
+                    kid.entry_grade = float(g_in)
                     if not is_fin:
                         kids.append(kid)
                     elif in_range:

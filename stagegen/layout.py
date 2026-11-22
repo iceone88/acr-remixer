@@ -35,7 +35,26 @@ class Layout:
         return syn / self.length
 
 
-def build_layout(state: State, step: float) -> Layout:
+def build_layout(state: State, step: float, regen_joins: dict | None = None) -> Layout:
+    """regen_joins: {join index k (between piece k-1 and k): reach m} - joins
+    whose geometry was changed (smoothed kinks): there the original calls no
+    longer fit, so within +-reach they are replaced by calls generated from
+    the new route."""
+    lay = _build_layout(state, step)
+    if not regen_joins:
+        return lay
+    gen = generate(lay.centreline, step)
+    wins = [(lay.piece_ranges[k][0] - r, lay.piece_ranges[k][0] + r) for k, r in regen_joins.items()]
+
+    def inside(s):
+        return any(a <= s <= b for a, b in wins)
+    notes = [n for n in lay.pacenotes if not inside(n.s)]
+    notes += [Pacenote(n.s, n.text, "generated") for n in gen if inside(n.s)]
+    lay.pacenotes = sorted(notes, key=lambda n: n.s)
+    return lay
+
+
+def _build_layout(state: State, step: float) -> Layout:
     pieces = state.all_pieces()
     pts, ws, notes, ranges = [], [], [], []
     s = 0.0

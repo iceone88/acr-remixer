@@ -107,6 +107,35 @@ def displace_payload(b: bytes, dz_fn) -> tuple[bytes, float]:
     return bytes(out), mx
 
 
+def warp_payload(b: bytes, fn) -> tuple[bytes, float]:
+    """Move vertices in every LOD: fn(positions_cm (N,3) mesh-local) -> new
+    positions (N,3). The mesh bounds (FBoxSphereBounds copies) grow to contain
+    the moved vertices. Returns the payload and the largest move (cm)."""
+    from .hlod import _bounds_offsets
+    out = bytearray(b)
+    mx = 0.0
+    lods = find_lods(b)
+    lo0 = hi0 = lo1 = hi1 = None
+    for li, lod in enumerate(lods):
+        P = np.frombuffer(b, "<f4", 3 * lod.n, lod.pos_off).reshape(-1, 3).astype(np.float64)
+        Q = np.asarray(fn(P), np.float64)
+        d = np.linalg.norm(Q - P, axis=1)
+        if not len(d) or not np.any(d):
+            continue
+        mx = max(mx, float(d.max()))
+        out[lod.pos_off: lod.pos_off + 12 * lod.n] = Q.astype("<f4").tobytes()
+        if li == 0:
+            lo0, hi0, lo1, hi1 = P.min(0), P.max(0), Q.min(0), Q.max(0)
+    if lo0 is not None and lods:
+        nlo, nhi = np.minimum(lo0, lo1), np.maximum(hi0, hi1)
+        for k in _bounds_offsets(b, lo0, hi0, lods[0].pos_off):
+            ctr, ext = (nlo + nhi) / 2, (nhi - nlo) / 2
+            struct.pack_into("<3d", out, k, *ctr)
+            struct.pack_into("<3d", out, k + 24, *ext)
+            struct.pack_into("<d", out, k + 48, float(np.linalg.norm(ext)))
+    return bytes(out), mx
+
+
 def mesh_export_index(pk: Package) -> int:
     """The UStaticMesh export (the largest one that is not the BodySetup)."""
     cands = [(e.serial_size, i) for i, e in enumerate(pk.exports) if not e.name.startswith("BodySetup")]

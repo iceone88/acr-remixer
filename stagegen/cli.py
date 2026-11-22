@@ -159,7 +159,15 @@ def _build_wp(a, paks: str) -> int:
                 if a.length > 0.9 * uses * src_km * 1000 else "try another --seed or a slightly different --length")
         print(f"no layout found: {hint}")
         return 1
-    layout = build_layout(best, 2.0)
+    # smooth the joins (shear both sides of each kinked join) before the layout
+    # is built; the pacenotes around smoothed joins are regenerated
+    from .tiles import smooth_layout_points
+    shears, smoothed = smooth_layout_points(best, cfg)
+    regen = {k: reach + 40.0 for k, reach in smoothed.items()}
+    layout = build_layout(best, 2.0, regen)
+    n_sm = len(regen)
+    if n_sm:
+        print(f"smoothed {n_sm} join(s); pacenotes there regenerated from the new road")
     if not getattr(a, "sequence", None) and abs(best.length - a.length) > cfg.length_tolerance * a.length:
         print(f"note: {a.length/1000:.1f} km is not achievable from {a.level}; using the closest: "
               f"{best.length/1000:.2f} km")
@@ -205,6 +213,7 @@ def _build_wp(a, paks: str) -> int:
             val = v
         setattr(cfg, k, val)
         print(f"  option {k} = {val!r}")
+    cfg.join_shears = shears
     rep = build_wp_stage(layout, best, cuts, grid, ws, paks, out, cfg)
     progress(0.99, "finishing")
     try:
