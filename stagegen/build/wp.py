@@ -235,6 +235,44 @@ def _component_transforms_for_mesh(pk: Package, mesh_pkg_path: str) -> list:
     return out
 
 
+def _occupancy(xy: np.ndarray, tris: np.ndarray, cell: float = 20.0):
+    """Raster (origin, cell, bool grid) of where a mesh has triangles (xy in m)."""
+    tris = tris[(tris[:, 0] != tris[:, 1]) | (tris[:, 1] != tris[:, 2])]
+    lo = xy.min(0) - cell
+    shape = (np.ceil((xy.max(0) - lo) / cell).astype(int) + 2)
+    occ = np.zeros(shape, bool)
+    gx = lo[0] + (np.arange(shape[0]) + 0.5) * cell
+    gy = lo[1] + (np.arange(shape[1]) + 0.5) * cell
+    for t in tris:
+        a, b, c = xy[t[0]], xy[t[1]], xy[t[2]]
+        mn, mx = np.minimum(np.minimum(a, b), c), np.maximum(np.maximum(a, b), c)
+        i0, i1 = np.searchsorted(gx, mn[0] - cell), np.searchsorted(gx, mx[0] + cell)
+        j0, j1 = np.searchsorted(gy, mn[1] - cell), np.searchsorted(gy, mx[1] + cell)
+        if i1 <= i0 or j1 <= j0:
+            continue
+        X, Y = np.meshgrid(gx[i0:i1], gy[j0:j1], indexing="ij")
+        v0, v1 = c - a, b - a
+        den = v0[0] * v1[1] - v1[0] * v0[1]
+        if den == 0:
+            continue
+        px, py = X - a[0], Y - a[1]
+        u = (px * v1[1] - v1[0] * py) / den
+        v = (v0[0] * py - px * v0[1]) / den
+        # a cell counts if its centre is in the triangle (with half a cell of slack)
+        slack = 0.5 * cell / max(np.linalg.norm(v0), np.linalg.norm(v1), 1e-6)
+        occ[i0:i1, j0:j1] |= (u >= -slack) & (v >= -slack) & (u + v <= 1 + slack)
+    return lo, cell, occ
+
+
+def _occ_hit(raster, pts: np.ndarray) -> np.ndarray:
+    lo, cell, occ = raster
+    ij = np.floor((pts - lo) / cell).astype(int)
+    ok = (ij[:, 0] >= 0) & (ij[:, 1] >= 0) & (ij[:, 0] < occ.shape[0]) & (ij[:, 1] < occ.shape[1])
+    out = np.zeros(len(pts), bool)
+    out[ok] = occ[ij[ok, 0], ij[ok, 1]]
+    return out
+
+
 _MESH_EXTENT: dict = {}
 
 
@@ -480,6 +518,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     # footprints from the visual meshes (most backdrop tiles have no collision):
     # LOD0 vertices + the tile actor's location, in source metres
     tile_src: dict = {}
+    tile_occ: dict = {}                 # name -> occupancy raster (the meshes have holes)
     main_pk = pkgs[ws.main]
     for c in decode_components(main_pk, rules):
         own = main_pk.exports[c.owner].name if c.owner < len(main_pk.exports) else ""
@@ -495,6 +534,9 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             continue
         P_ = np.frombuffer(mb_, "<f4", 3 * lods_[0].n, lods_[0].pos_off).reshape(-1, 3).astype(np.float64)
         tile_src[own] = (P_ + c.loc) / 100
+        tris_ = [np.frombuffer(mb_, "<u4" if w_ == 4 else "<u2", cnt_ // w_, off_).reshape(-1, 3)
+                 for off_, cnt_, w_ in lods_[0].index_bufs]
+        tile_occ[own] = _occupancy(tile_src[own][:, :2], np.vstack(tris_) if tris_ else np.empty((0, 3), int))
     filler_plan: dict = {}              # name -> None (rigid with bd_piece) | shift (2,) | "hide"
     if cfg.filler and tile_src:
         rigid_keep = set()
@@ -505,26 +547,50 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         ext = {n: np.ptp(U[:, :2], axis=0) for n, U in tile_src.items()}
         size = float(max(e.max() for e in ext.values()))
         full = {n for n, e in ext.items() if e.min() > 0.8 * size}
-        lo = new_cl[:, :2].min(0) - 0.5 * size
-        hi = new_cl[:, :2].max(0) + 0.5 * size
-        C = np.array([(x, y) for x in np.arange(lo[0], hi[0] + size, 0.95 * size)
-                      for y in np.arange(lo[1], hi[1] + size, 0.95 * size)])
-        dC, _ = cKDTree(new_cl[:, :2]).query(C)
-        free_c = np.ones(len(C), bool)
+        # greedy cover on the real tile shapes (occupancy rasters: the backdrop
+        # has holes where the original track tiles were): sample points along
+        # the route and 200 m either side; each step places the free tile and
+        # position that covers the most still-uncovered points
+        rq = resample(new_cl, 20.0)
+        tq = np.gradient(rq[:, :2], axis=0)
+        tq /= np.maximum(np.linalg.norm(tq, axis=1, keepdims=True), 1e-9)
+        nq = np.c_[-tq[:, 1], tq[:, 0]]
+        Q = np.vstack([rq[:, :2] + nq * off for off in (-200.0, 0.0, 200.0)])
+        todo = np.ones(len(Q), bool)
         if rigid_keep:
             pc0 = pieces[bd_piece]
-            cov = np.vstack([tile_src[n] @ pc0.R.T + pc0.t for n in rigid_keep])
-            free_c = cKDTree(cov[:, :2]).query(C)[0] > 0.35 * size
-        cells = [C[i] for i in np.argsort(dC) if free_c[i] and dC[i] < 1.2 * size]
+            for n in rigid_keep:                   # source xy of the query points for that tile
+                Qs = (Q - pc0.t[:2]) @ pc0.R[:2, :2]
+                todo &= ~_occ_hit(tile_occ[n], Qs)
+        placed: dict = {}
         free_t = sorted(n for n in tile_src if n not in rigid_keep and n in full)
+        while todo.any():
+            cand = Q[todo][:: max(1, int(todo.sum()) // 120)]
+            best = (0, None, None)
+            for n in free_t:
+                if n in placed:
+                    continue
+                ctr_n = (tile_src[n][:, :2].min(0) + tile_src[n][:, :2].max(0)) / 2
+                for cxy in cand:
+                    sh = cxy - ctr_n
+                    hit = todo & _occ_hit(tile_occ[n], Q - sh)
+                    k_ = int(hit.sum())
+                    if k_ > best[0]:
+                        best = (k_, n, sh)
+            if best[1] is None:
+                break
+            _, n, sh = best
+            placed[n] = sh
+            todo &= ~_occ_hit(tile_occ[n], Q - sh)
+        cells = list(placed.values())
+        free_t = list(placed) + [n for n in free_t if n not in placed]
         for n in tile_src:
             if n not in rigid_keep and n not in full:
                 filler_plan[n] = "hide"
         for n in rigid_keep:
             filler_plan[n] = None
-        for n, cell in zip(free_t, cells):
-            U = tile_src[n]
-            filler_plan[n] = cell - (U[:, :2].min(0) + U[:, :2].max(0)) / 2
+        for n, sh in placed.items():
+            filler_plan[n] = sh
         for n in free_t[len(cells):]:
             filler_plan[n] = "hide"
         rep.checks.append(f"filler ground: {len(tile_src)} backdrop tiles of ~{size:.0f} m: {len(rigid_keep)} stay with "
