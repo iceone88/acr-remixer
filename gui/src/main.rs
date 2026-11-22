@@ -152,6 +152,9 @@ enum Msg {
 struct Job {
     rx: Receiver<Msg>,
     remaining: Vec<u32>,
+    total: usize,
+    progress: f32,
+    phase: String,
 }
 
 struct App {
@@ -172,7 +175,9 @@ enum Tab {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
-        App { prefs, log: String::new(), job: None, preview: None, tab: Tab::Map }
+        let mut app = App { prefs, log: String::new(), job: None, preview: None, tab: Tab::Map };
+        app.preview = load_preview(&app.out_for(app.prefs.seed)).ok();     // reopen the last stage
+        app
     }
 
     fn out_for(&self, seed: u32) -> PathBuf {
@@ -184,7 +189,8 @@ impl App {
         self.log.clear();
         self.tab = Tab::Log;
         let (_, rx) = channel();
-        self.job = Some(Job { rx, remaining: seeds });
+        let total = seeds.len();
+        self.job = Some(Job { rx, remaining: seeds, total, progress: 0.0, phase: "starting".into() });
         self.next();
     }
 
@@ -215,6 +221,8 @@ impl App {
         let out = PathBuf::from(&p.out_dir).join(format!("{}_seed{}", p.stage, seed));
         let (tx, rx) = channel();
         job.rx = rx;
+        job.progress = 0.0;
+        job.phase = "starting".into();
         self.log.push_str(&format!("\n=== {} seed {} ===\n", p.stage, seed));
         match backend_cmd(&p) {
             Ok((prog, mut full, cwd)) => {
@@ -238,7 +246,7 @@ impl App {
             Ok((prog, mut full, cwd)) => {
                 full.extend(["uninstall".to_string(), "--paks".into(), paks]);
                 let (tx, rx) = channel();
-                self.job = Some(Job { rx, remaining: vec![] });
+                self.job = Some(Job { rx, remaining: vec![], total: 1, progress: 0.5, phase: "uninstalling".into() });
                 spawn_build(prog, cwd, full, None, tx);
             }
             Err(e) => self.log.push_str(&format!("backend: {e}\n")),
@@ -247,10 +255,16 @@ impl App {
 
     fn poll(&mut self) {
         let mut finished = None;
-        if let Some(job) = &self.job {
+        if let Some(job) = &mut self.job {
             while let Ok(m) = job.rx.try_recv() {
                 match m {
                     Msg::Line(l) => {
+                        if let Some(rest) = l.strip_prefix("@progress ") {
+                            let (f, phase) = rest.split_once(' ').unwrap_or((rest, ""));
+                            job.progress = f.trim().parse().unwrap_or(job.progress);
+                            job.phase = phase.to_string();
+                            continue;
+                        }
                         self.log.push_str(&l);
                         self.log.push('\n');
                     }
@@ -411,9 +425,13 @@ impl eframe::App for App {
                 && (BACKEND.is_some() && !self.prefs.use_python
                     || Path::new(&self.prefs.backend_dir).join("stagegen").is_dir());
             ui.horizontal(|ui| {
-                if busy {
-                    ui.spinner();
-                    ui.label("building ...");
+                if let Some(job) = &self.job {
+                    ui.vertical(|ui| {
+                        let k = job.total - job.remaining.len();
+                        let prefix = if job.total > 1 { format!("stage {k} of {}: ", job.total) } else { String::new() };
+                        ui.add(egui::ProgressBar::new(job.progress).desired_width(300.0).animate(true)
+                            .text(format!("{prefix}{} ({:.0} %)", job.phase, job.progress * 100.0)));
+                    });
                 } else if ui.add_enabled(ready, egui::Button::new("▶  Generate").min_size([140.0, 30.0].into())).clicked() {
                     self.start();
                 }

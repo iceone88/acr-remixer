@@ -1,4 +1,4 @@
-﻿"""Build a recombined base-game (World Partition) stage as a mod container.
+"""Build a recombined base-game (World Partition) stage as a mod container.
 
 What gets rewritten (everything else is still served by the game):
   * main level: streaming LoadingRange raised so every cell stays loaded
@@ -39,6 +39,7 @@ from .iostore_write import ChunkIn, container_header_chunk_id, retarget_containe
 from .level import decode_components, learn_rules, patched_payload
 from .mesh_clip import clip_mesh_payload, displace_payload, mesh_export_index
 from .wp_hash import all_cells_in_top_level, drop_cells, widen_cell_data
+from ..progress import progress, span
 from .foliage import hide_instances, move_hism
 from .hlod import mesh_world_bounds, transform_mesh
 from .zen_write import rewrite_package
@@ -419,7 +420,8 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         return keep, NW, yaw
 
     forest_nobox = [0]
-    for path, pk in pkgs.items():
+    for k_pkg, (path, pk) in enumerate(pkgs.items()):
+        span(0.12, 0.55, k_pkg, len(pkgs), "moving actors and foliage")
         ex = pk.exports
         route = ws.route_cells.get(path)
         # foliage left out ("hide"): zero-scaled; unmoved it would float at the
@@ -655,7 +657,9 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
 
     gen_dir = f"/{lvl}/GeneratedSplits/"
     seam_max = 0.0
-    for key, j in ([] if cfg.debug_no_clip else sorted(tile_piece.items())):
+    clip_items = [] if cfg.debug_no_clip else sorted(tile_piece.items())
+    for k_clip, (key, j) in enumerate(clip_items):
+        span(0.55, 0.75, k_clip, len(clip_items), "clipping and blending terrain")
         if key not in tile_pivot:
             rep.checks.append(f"tile {key} has no actor"); continue
         stem = f"SM_{lvl}Track{key[0]:02d}{key[1]:02d}_"
@@ -723,6 +727,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         return (unc_ext[idx] & (s >= pc.sa - 40) & (s <= pc.sb + 40) & lat_ok(s, d, cfg.terrain_clip)
                 & owns(bd_piece, w_m))
 
+    progress(0.76, "shaping the ground")
     filler_h = None
     if cfg.filler:
         filler_h = _filler_height_field(
@@ -763,6 +768,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             rep.clipped.append((p.rsplit("/", 1)[-1], st["lods"], st["dropped"], st["tris"]))
 
     # ---- baked collision
+    progress(0.8, "building collision")
     out_meshes: list[W.MeshOut] = []
     for m in meshes:
         if b"OriginQuad" in m.soft_sub:
@@ -850,6 +856,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     new_pkgs[ws.baked] = rewrite_package(bpk, {0: W.baked_payload_full(bf, out_meshes)})
 
     # ---- pacenotes
+    progress(0.86, "pacenotes and mod files")
     for key, path in ws.tables.items():
         tpk = Package(fs.read(path))
         if key == "forward":
@@ -880,6 +887,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     write_container(base, cid, chunks, pak_template)
     rep.out_files = [base + ext for ext in (".utoc", ".ucas", ".pak")]
     rep.packages = len(new_pkgs)
+    progress(0.93, "checking the result")
     rep.checks += verify_wp(base + ".utoc", ws, new_pkgs, payloads, rules)
     return rep
 

@@ -1,70 +1,138 @@
 ﻿# acr-stagegen
 
-Generate new Assetto Corsa Rally stages by recombining road segments from the
-stages you already own. Everything is read in place from your install; the
-output is a small mod container that only references game/mod assets.
+**New rally stages for Assetto Corsa Rally, generated from the stages you already own.**
 
-**Status (2026-11-21):**
-- Reads real game data: route splines, road width and original pacenotes for all
-  10 base-game stages and mod stages (~150 km of road). Base-game containers are
-  Oodle-compressed and need an `oo2core_9_win64.dll` already on the machine
-  (auto-detected, or set `ACR_OODLE_DLL`).
-- Generates layouts from real segments (any location).
-- **Builds installable base-game stages** (World Partition levels, e.g.
-  `WalesS4HafrenSouth`): pieces are cut where the route crosses the 350 m
-  track-tile grid and joined grid line to grid line, so road and terrain meet
-  edge to edge; each tile's mesh and collision are clipped to its own road
-  corridor (no terrain walls from neighbouring pieces). The result currently
-  overrides the source stage (Forward + Reverse). See `stagegen/tiles.py`,
-  `stagegen/build/wp.py`. **Tested in-game 2026-11-22: a generated 4.8 km Hafren
-  South was driven start to finish (road/terrain render, joins and finish work).**
-- Not moved yet on base-game builds: trees/grass (foliage instances), respawn
-  planes, replay cameras; Cut variants are not supported.
+acr-stagegen cuts the official stages into pieces and stitches them together in a
+new order: new corners, new sequences, new pacenotes. Every seed is a different
+stage. Everything comes from your own game install; nothing is downloaded.
+
+![A generated Hafren South stage in the game](docs/ingame-forest.jpg)
+
+> **Status: early, good enough for practice.**
+> Wales – Hafren South works well. The other stages are marked
+> *experimental*: they may be undrivable or crash the game for now.
+
+---
+
+## Quick start
+
+1. **Download** `acr-stagegen.exe` from the
+   [latest nightly release](../../releases/tag/nightly). It is a single file;
+   there's nothing to install.
+2. **Start it.** Windows may show a blue "Windows protected your PC" box
+   because the program is not signed: click *More info* → *Run anyway*.
+3. The program **finds Assetto Corsa Rally by itself** (through Steam). If it
+   doesn't, open *Setup* and paste the game folder, e.g.
+   `D:\SteamLibrary\steamapps\common\Assetto Corsa Rally`.
+4. Pick a **stage**, a **length** and a **seed** (any number, or the 🎲 button),
+   then press **▶ Generate**. A build takes about a minute; the bar shows what
+   it's doing.
+5. With *Install into the game* ticked, the new stage is installed automatically
+   (ACR is closed first if it's running). Tick *Start ACR afterwards* to jump
+   straight in.
+
+![The acr-stagegen window with a generated stage](docs/gui-map.png)
+
+## Driving your stage
+
+The generated stage **takes the place of the stage it was made from** (for
+now). For Hafren South:
+
+*Free Practice* → **Wales** → **Hafren South** → start the session.
+
+You'll see the original stage name and length in the menu, but you'll drive the
+new layout, with matching pacenotes.
+
+To get the original stage back, press **Uninstall generated stage**.
+
+## The options
+
+| Option | What it does |
+|---|---|
+| **Stage** | Which official stage to take the pieces from. |
+| **Length** | The length you'd like. Each source stage only has so much road, so the program picks the closest length that's possible. |
+| **Seed** | The "recipe" number. Same stage + length + seed = the same result, so you can share good ones with friends. |
+| **Batch** | Builds several stages in a row (seed, seed+1, …), so you can compare them on the map. Only the last one is installed. |
+| **Forest / Grass & rocks / Ground grass** | Trees and plants along the road. Untick some if your PC struggles; the stage then looks barer but runs faster. |
+| **Install / Start ACR** | Put the stage into the game automatically, and optionally start the game. |
+
+The **Map** tab shows the new route from above (each colour is one piece of an
+original stage), **Elevation** shows the height profile with the joins marked,
+and **Log** shows the details of the last build.
+
+## What a stage looks like
+
+A camera tour through a generated stage, from the start (top left) to the finish:
+
+![Camera tour of a generated stage](docs/tour.jpg)
+
+## Good to know
+
+- **It's a mod:** it adds three files to `Assetto Corsa Rally\acr\Content\Paks\~mods`.
+  *Uninstall generated stage* removes them. Your original game files are never
+  changed.
+- **Online / leaderboards:** use it offline. Times on a generated stage are
+  not comparable to the real one.
+- **Game updates** may break it until acr-stagegen is updated.
+- Known rough edges: the service park can look odd, small seams at the joins,
+  and a few distant hills may look out of place.
+
+---
+
+## For developers
+
+The GUI (`gui/`, Rust + [egui](https://github.com/emilk/egui)) runs the
+generator backend (`stagegen/`, Python), which is embedded as a frozen exe in
+release builds. Base-game files are Oodle-compressed; `oodle_shim/` provides an
+open-source decompressor DLL (via
+[oozextract](https://crates.io/crates/oozextract), MIT) so no proprietary Oodle
+DLL is needed.
 
 ```
-py -m stagegen.cli list                                   # levels found in the install
-py -m stagegen.cli generate --location Wales --length 10000 --seed 2 --out out/
-py -m stagegen.cli build --level WalesS4HafrenSouth --length 4500 --seed 1 --out out
-py -m stagegen.cli install out/WalesS4HafrenSouth_seed1  # copies 3 files into acr/Content/Paks/~mods
-py -m stagegen.cli uninstall                              # deletes them again -> original SS1 back
+pip install -r requirements.txt                 # numpy, scipy (+ matplotlib for PNG previews)
+python -m stagegen.cli list                     # levels in the install
+python -m stagegen.cli build --level WalesS4HafrenSouth --length 4500 --seed 1 --out out --install
+python -m stagegen.cli build ... --no-forest --no-grass --no-foliage   # leave foliage out
+python -m stagegen.cli build ... --cfg seam_width=40                    # any WPConfig option
+python -m stagegen.cli uninstall
 ```
-(Use the full path to Python 3.14: `%LOCALAPPDATA%\Programs\Python\Python314\python.exe`; needs numpy, scipy, matplotlib.)
 
-## How the build works (`stagegen/build/`)
+Release build (what `.github/workflows/nightly.yml` does):
 
-The generated stage takes over an existing stage slot through a higher-priority
-IoStore container (`pakchunk99-WrcgEsSS1_Stagegen_9_P`) that holds only three
-rewritten packages; every other asset is still served by the original mod.
+```
+cargo build --release --manifest-path oodle_shim/Cargo.toml
+python -m PyInstaller packaging/backend.spec --distpath packaging/dist --workpath packaging/build
+cargo build --release --manifest-path gui/Cargo.toml      # embeds packaging/dist/stagegen-backend.exe
+```
 
-1. **Layout**: segments of the one level, with the opening segment (start area)
-   and closing segment (finish area) fixed, middle segments shuffled/reversed.
-2. **Level (.umap)**: root scene components of actors in the used segments are
-   moved with their segment's rigid transform to a fresh area next to the old
-   map (exact per-class decoding, see `level.py`). Intermediate split triggers
-   are re-placed along the new route in order. Route splines (centre, ideal,
-   borders, looped contour) are rebuilt. The RVT volumes are moved over the
-   new area so the road texture renders.
-3. **Physics (`DA_*BakedData`, dmphysics)**: collision triangles are split per
-   segment by distance along the source route, transformed, and connector
-   road + verges are lofted.
-4. **Pacenotes**: original calls carried over for forward segments; generated
-   (game token vocabulary) for reversed segments and connectors.
-5. **Container**: uncompressed TOC v8 + copied container header + `.pak` stub.
+In-game test automation (`tools/`): `acr_autotest.py` installs a build, starts
+ACR, drives the menus with a virtual gamepad (ViGEmBus + vgamepad), drives off
+the start line, then runs a camera tour via a UE4SS Lua mod and saves a contact
+sheet, all hands-off.
 
-### Known limitations
-- Connectors (~5-10 % of the stage) get collision plus a transplanted unused
-  terrain tile (with its RVT road-texture writer) aligned to the join; the
-  road there is visually approximate, and placements are rejected if the
-  tile's terrain would rise above the drivable road elsewhere.
-- Terrain tiles are 128 m; tiles near joints overlap or leave gaps.
-- Not moved: crowds' internal spline paths, foliage instance actors (HISM), TV
-  cameras outside used segments, physics state of cones (if stored separately).
-- The track list still shows the original SS1 name/length.
-- Base-game levels (World Partition) can be read but not yet rebuilt.
+### How a stage is built (`stagegen/build/wp.py`)
 
-## Reverse-engineered formats (`stagegen/extract/`)
-- `iostore.py` IoStore TOC v8 reader (Oodle via ctypes); `zen.py` zen package
-  header (5.5+ summary with cell maps); `unversioned.py` property headers.
-- `bakeddata.py` dmphysics BakedDataContainer (meshes in metres, axes x,up,y).
-- `splines.py` DMSplineComponent curves; `pacenote_table.py` PacenoteSplineEntry rows.
-- `build/cityhash.py` CityHash64 (verified against stored name hashes).
+1. **Layout** (`tiles.py`): the source route is cut where it crosses the 350 m
+   track-tile grid; pieces are joined grid line to grid line, so road and
+   terrain meet edge to edge.
+2. **Level**: tile actors, props, decals, crowds etc. move with their piece's
+   rigid transform to a free area next to the original map; route splines,
+   start/finish and splits are rebuilt; the RVT volume follows.
+3. **Terrain**: each piece keeps the terrain it owns (Voronoi on the new
+   layout); neighbouring pieces' terrain is blended at the seams; the coarse
+   backdrop terrain is reshaped into filler ground under the whole stage.
+4. **Foliage**: PCG forest and ground cover (HISM/ISM instances) are moved per
+   instance; their cluster trees and cached bounds are rebuilt.
+5. **Collision** (`DA_*BakedData`), **pacenotes** (forward/reverse tables) and an
+   uncompressed IoStore container (`pakchunk99-<Level>_Stagegen_9_P`) that
+   overrides only the rewritten packages.
+
+### Reverse-engineered formats (`stagegen/extract/`, `stagegen/build/`)
+- `iostore.py` IoStore TOC v8 reader; `zen.py` zen package header (5.5+ summary
+  with cell maps); `unversioned.py` unversioned property headers (zero masks!).
+- `bakeddata.py` / `writers.py` dmphysics BakedDataContainer (4 fields; meshes in
+  metres, axes x,up,y), byte-identical round trip.
+- `splines.py` DMSplineComponent curves; `pacenote_table.py` pacenote rows.
+- `mesh_clip.py` / `hlod.py` cooked static mesh LODs; `foliage.py` (H)ISM
+  instances, cluster trees, FBox / box-sphere bounds.
+- `wp_hash.py` World Partition runtime spatial hash; `build/cityhash.py` CityHash64.

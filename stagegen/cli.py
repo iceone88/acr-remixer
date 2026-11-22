@@ -54,9 +54,12 @@ def _build_wp(a, paks: str) -> int:
     from .extract.iostore import GameFS
     from .extract.real import load_wp_source
     from .extract.zen import Package
+    from .progress import progress
     from .tiles import TileGrid, TileSearchConfig, find_cuts, make_ranges, tile_search
+    progress(0.0, "reading the game files")
     fs = GameFS(paks, include_mods=False)
     ws = load_wp_source(fs, a.level)
+    progress(0.08, "searching a layout")
     st = ws.stage
     meshes, *_ = W.read_baked_raw(Package(fs.read(ws.baked)))
     grid = TileGrid.from_baked(meshes)
@@ -110,6 +113,7 @@ def _build_wp(a, paks: str) -> int:
         setattr(cfg, k, val)
         print(f"  option {k} = {val!r}")
     rep = build_wp_stage(layout, best, cuts, grid, ws, paks, out, cfg)
+    progress(0.99, "finishing")
     try:
         from .build.preview import render_collision
         fwd = next(p for p, k in ws.route_cells.items() if k == "fwd")
@@ -144,6 +148,8 @@ def _stop_game() -> None:
 def _build(a) -> int:
     rc = _build_impl(a)
     if rc == 0 and (a.install or a.launch):
+        from .progress import progress
+        progress(1.0, "installing into the game")
         _stop_game()
         a.build_dir = os.path.join(a.out, f"{a.level}_seed{a.seed}")
         rc = _install(a)
