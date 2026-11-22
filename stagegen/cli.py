@@ -60,7 +60,11 @@ def _build_wp(a, paks: str) -> int:
     t = time.time()
     best = tile_search(st, ranges, cuts, cfg)
     if best is None:
-        print("no layout found; try another --seed or --length")
+        src_km = (len(st.points) - 1) * 2 / 1000
+        hint = (f"{a.level} has only {src_km:.1f} km of road and every section is used at most once, "
+                f"so stages are limited to about {0.9 * src_km:.1f} km; use a lower --length or a bigger level"
+                if a.length > 0.9 * src_km * 1000 else "try another --seed or a slightly different --length")
+        print(f"no layout found: {hint}")
         return 1
     layout = build_layout(best, 2.0)
     order = " ".join(p.segment_id.split("#")[1] + ("r" if p.reversed else "") for p in layout.pieces)
