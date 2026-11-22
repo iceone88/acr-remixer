@@ -1,10 +1,14 @@
--- StageTest (acr-stagegen): once the player is in a car, teleport it to the
--- points listed in ../points.txt ("label x y z yaw", Unreal cm / degrees) and
--- log "[StageTest] at <label>" after each move so the host can screenshot.
+-- StageTest (acr-stagegen): camera tour of a generated stage for screenshots.
+--  * once the player is in a car (possessed pawn is not a camera) and ~10 s
+--    have passed, switch to the debug camera and fly its SpectatorPawn to each
+--    point in ../points.txt ("label x y z yaw", Unreal cm / degrees)
+--  * logs "[StageTest] at <label> want=(..) cam=(..)" when in place, "done" at the end
+--  * live hook: ../live.lua is re-run whenever it changes (iterate without restarts)
+-- Teleporting the physics car itself crashes the game; only the camera moves.
 local here = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("(.*/)")
-local POINTS = here .. "../points.txt"
-local points, state, idx, wait, done = nil, "idle", 0, 0, false
-local start_loc = nil
+local POINTS, LIVE = here .. "../points.txt", here .. "../live.lua"
+
+local function v(l) return l and string.format("(%.0f, %.0f, %.0f)", l.X / 100, l.Y / 100, l.Z / 100) or "nil" end
 
 local function load_points()
     local f = io.open(POINTS, "r")
@@ -18,157 +22,104 @@ local function load_points()
     return t
 end
 
-local logged = {}
-local function pawn()
-    -- the car: the possessed pawn, once it is not a (service park) camera
-    local pcs = FindAllOf("PlayerController") or {}
-    local extra = FindAllOf("AcrPlayerController") or {}
-    for _, x in ipairs(extra) do table.insert(pcs, x) end
-    for _, pc in ipairs(pcs) do
-        if pc:IsValid() then
-            local p = pc.Pawn
-            if p and p:IsValid() then
-                local cls = p:GetClass():GetFName():ToString()
-                if not logged[cls] then
-                    logged[cls] = true
-                    print(string.format("[StageTest] possessed pawn %s\n", cls))
-                end
-                if not string.find(cls, "Camera") then return p end
-            end
-        end
+local function controller()
+    for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+        if pc:IsValid() and pc:GetClass():GetFName():ToString() ~= "DebugCameraController" then return pc end
     end
-    return nil
 end
 
-local function dist_to(p, pt)
-    local l = p:K2_GetActorLocation()
-    return math.sqrt((l.X - pt[2]) ^ 2 + (l.Y - pt[3]) ^ 2) / 100
-end
-
-local debug_cam = false
 local function console(cmd)
-    local pcs = FindAllOf("AcrPlayerController") or FindAllOf("PlayerController") or {}
-    for _, pc in ipairs(pcs) do
-        if pc:IsValid() then
-            local ksl = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-            ksl:ExecuteConsoleCommand(pc, cmd, pc)
-            return true
-        end
-    end
-    return false
+    local pc = controller()
+    if not pc then return false end
+    StaticFindObject("/Script/Engine.Default__KismetSystemLibrary"):ExecuteConsoleCommand(pc, cmd, pc)
+    return true
 end
 
--- Move the (debug) camera, not the car: teleporting the physics car crashes.
+local function in_car()
+    local pc = controller()
+    local p = pc and pc.Pawn
+    if not (p and p:IsValid()) then return false end
+    return not string.find(p:GetClass():GetFName():ToString(), "Camera")
+end
+
+local function debug_cam(on)
+    local dcc = FindFirstOf("DebugCameraController")
+    local active = (dcc ~= nil) and dcc:IsValid()
+    if on ~= active then console("ToggleDebugCamera") end
+end
+
 local function view_at(pt)
-    if not debug_cam then
-        console("ToggleDebugCamera")
-        debug_cam = true
-    end
+    debug_cam(true)
     local loc = { X = pt[2], Y = pt[3], Z = pt[4] + 400 }
     local rot = { Pitch = -12, Yaw = pt[5], Roll = 0 }
+    local sp = FindFirstOf("SpectatorPawn")
+    if sp and sp:IsValid() then sp:K2_TeleportTo(loc, rot) end
     local dcc = FindFirstOf("DebugCameraController")
-    if dcc and dcc:IsValid() then
-        pcall(function() dcc.Pawn:K2_TeleportTo(loc, rot) end)
-        pcall(function() dcc:SetControlRotation(rot) end)
-    else
-        console(string.format("BugItGo %.0f %.0f %.0f -12 %.1f 0", pt[2], pt[3], pt[4] + 400, pt[5]))
-    end
-    return 1
+    if dcc and dcc:IsValid() then dcc:SetControlRotation(rot) end
 end
 
-local function teleport(p, pt)
-    local loc = { X = pt[2], Y = pt[3], Z = pt[4] + 150 }
-    local rot = { Pitch = 0, Yaw = pt[5], Roll = 0 }
-    local root = p.RootComponent
-    -- K2_TeleportTo has no out-parameters (passing an FHitResult from Lua crashed UE4SS)
-    local methods = {
-        function() p:K2_TeleportTo(loc, rot) end,
-    }
-    for m, f in ipairs(methods) do
-        local ok, err = pcall(f)
-        local d = dist_to(p, pt)
-        if d < 20 then
-            pcall(function()
-                root:SetPhysicsLinearVelocity({ X = 0, Y = 0, Z = 0 }, false, "None")
-                root:SetPhysicsAngularVelocityInDegrees({ X = 0, Y = 0, Z = 0 }, false, "None")
-            end)
-            return m
+local function cam_loc()
+    local ok, r = pcall(function() return v(FindFirstOf("DebugCameraController").PlayerCameraManager:GetCameraLocation()) end)
+    return ok and r or "?"
+end
+
+-- tour state machine, ticks every 0.5 s
+local state, points, i, t, done = "wait_car", nil, 0, 0, false
+local function restart() state, points, i, t, done = "wait_car", nil, 0, 0, false end
+StageTestAPI = { console = console, view_at = view_at, restart = restart, debug_cam = debug_cam }
+
+LoopAsync(500, function()
+    local ok, err = pcall(function()
+        if done then return end
+        t = t + 1
+        if state == "wait_car" then
+            if in_car() then
+                points = load_points()
+                if points and #points > 0 then
+                    state, t = "settle", 0
+                    print(string.format("[StageTest] in car, %d points\n", #points))
+                end
+            else
+                t = 0
+            end
+        elseif state == "settle" and t >= 20 then        -- ~10 s for the stage to stream in
+            state, i, t = "move", 0, 0
+        elseif state == "move" then
+            i = i + 1
+            if i > #points then
+                debug_cam(false)
+                print("[StageTest] done\n")
+                done = true
+                return
+            end
+            view_at(points[i])
+            state, t = "hold", 0
+        elseif state == "hold" and t >= 5 then             -- 2.5 s to stream, then shoot
+            print(string.format("[StageTest] at %s want=(%.0f, %.0f) cam=%s\n", points[i][1],
+                points[i][2] / 100, points[i][3] / 100, cam_loc()))
+            state, t = "shot", 0
+        elseif state == "shot" and t >= 2 then             -- host grabs within 1 s
+            state = "move"
         end
-        print(string.format("[StageTest] method %d failed (%s), still %.0f m away\n", m, tostring(err), d))
-    end
-    return 0
-end
+    end)
+    if not ok then print("[StageTest] error: " .. tostring(err) .. "\n") end
+    return false
+end)
 
-StageTestAPI = {
-    console = function(c) return console(c) end,
-    view_at = function(pt) return view_at(pt) end,
-    restart = function() done, state, start_loc, points, debug_cam = false, "idle", nil, nil, false end,
-}
-
--- live hook: re-run ../live.lua whenever it changes (iterate without restarting the game)
-local LIVE, live_src = here .. "../live.lua", ""
+local live_src = nil
 LoopAsync(1000, function()
     local f = io.open(LIVE, "r")
     if f then
         local src = f:read("*a"); f:close()
+        if live_src == nil then live_src = src end           -- don't re-run a stale file at startup
         if src ~= live_src then
             live_src = src
-            local chunk, err = load(src, "live")
-            if chunk then
-                local ok, e = pcall(chunk)
-                print("[StageTest] live: " .. (ok and "ok" or tostring(e)) .. "\n")
-            else print("[StageTest] live load error: " .. tostring(err) .. "\n") end
+            local chunk, e = load(src, "live")
+            local ok, r = false, e
+            if chunk then ok, r = pcall(chunk) end
+            print("[StageTest] live: " .. (ok and "ok" or tostring(r)) .. "\n")
         end
     end
-    return false
-end)
-
-LoopAsync(1000, function()
-    if done then return false end
-    local ok, err = pcall(function()
-        local p = pawn()
-        if state == "idle" then
-            -- wait until the car is on the stage and has left the start line
-            points = points or load_points()
-            if p and points and #points > 0 then
-                local l = p:K2_GetActorLocation()
-                start_loc = start_loc or l
-                local moved = math.sqrt((l.X - start_loc.X) ^ 2 + (l.Y - start_loc.Y) ^ 2) / 100
-                if math.abs(l.X) + math.abs(l.Y) < 1 then start_loc = nil
-                elseif moved > 15 then
-                    state, wait = "settle", 3
-                    print(string.format("[StageTest] go: pawn %s at (%.0f, %.0f), %d points\n",
-                        p:GetClass():GetFName():ToString(), l.X / 100, l.Y / 100, #points))
-                end
-            end
-        elseif state == "settle" then
-            wait = wait - 1
-            if wait <= 0 then state, idx = "move", 1 end
-        elseif state == "move" then
-            if not p then return end
-            view_at(points[idx])
-            state, wait = "hold", 5
-        elseif state == "hold" then
-            wait = wait - 1
-            if wait <= 0 then
-                print(string.format("[StageTest] at %s (%.0f, %.0f, %.0f)\n", points[idx][1],
-                    points[idx][2] / 100, points[idx][3] / 100, points[idx][4] / 100))
-                state, wait = "shot", 3
-            end
-        elseif state == "shot" then
-            wait = wait - 1
-            if wait <= 0 then
-                idx = idx + 1
-                if idx > #points then
-                    if debug_cam then console("ToggleDebugCamera") end
-                    print("[StageTest] done\n"); done = true
-                else
-                    state = "move"
-                end
-            end
-        end
-    end)
-    if not ok then print("[StageTest] error: " .. tostring(err) .. "\n") end
     return false
 end)
 print("[StageTest] loaded\n")
