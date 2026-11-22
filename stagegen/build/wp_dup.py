@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Duplicate World Partition cells, so a tile can appear twice in a stage.
 
 A cell of a cooked WP level is, in the main level package:

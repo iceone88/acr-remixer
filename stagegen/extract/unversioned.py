@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Helpers for UE unversioned property serialization (cooked assets).
 
 An unversioned struct starts with u16 fragments: bits 0-6 skip count, bit 7

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Generated road pieces that bridge two segment ends.
 
 Horizontal: cubic Hermite curve between the two headings (a gentle bend; yaw

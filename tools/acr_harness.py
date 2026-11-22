@@ -1,4 +1,7 @@
-﻿"""Drive Assetto Corsa Rally with a virtual Xbox pad (ViGEmBus + vgamepad).
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Drive Assetto Corsa Rally with a virtual Xbox pad (ViGEmBus + vgamepad).
 
     py tools/acr_harness.py --steps "launch,wait45,RB,wait2,A,shot:menu" --out shots
 

@@ -1,4 +1,7 @@
-﻿"""Build SourceStage objects from the game's own data.
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Build SourceStage objects from the game's own data.
 
 Per level:
   * centreline + road edges  <- SplinesActor (CenterSpline, Left/RightBorderSpline)

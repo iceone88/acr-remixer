@@ -1,4 +1,7 @@
-﻿"""Cut source stages into reusable segments at 'quiet' points of the road.
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Cut source stages into reusable segments at 'quiet' points of the road.
 
 A good cut point is somewhere a seam will be least noticeable and easiest to
 blend: low horizontal curvature, roughly constant grade, and steady width.

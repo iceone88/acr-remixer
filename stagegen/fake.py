@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Synthetic 'source stages' for developing the generator before real data
 is extracted. Roads are built from a curvature program (straights, corners
 with linear-curvature transitions) plus smooth random elevation."""

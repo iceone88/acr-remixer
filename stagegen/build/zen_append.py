@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Append exports to a cooked zen package (UE 5.6), e.g. to give a World
 Partition level an extra (duplicated) cell.
 

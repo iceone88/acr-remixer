@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Read the route splines from a stage level (SplinesActor -> DMSplineComponent).
 
 Each DMSplineComponent (CenterSpline, IdealSpline, Left/RightBorderSpline,

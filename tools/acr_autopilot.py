@@ -1,4 +1,7 @@
-﻿"""Drive a generated stage in ACR along its own CenterSpline (virtual pad +
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Drive a generated stage in ACR along its own CenterSpline (virtual pad +
 Kunos shared-memory telemetry) and report how far the car got.
 
     py tools/acr_autopilot.py --utoc out/X/pakchunk99-X_Stagegen_9_P.utoc --shots 700,1300 --out shots

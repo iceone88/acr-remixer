@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Read DT_Pacenote* DataTables (row struct /Script/acr.PacenoteSplineEntry).
 
 Row layout (unversioned):

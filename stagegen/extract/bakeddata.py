@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Reader for DA_<Location>BakedData (class /Script/dmphysics.BakedDataContainer).
 
 Layout reverse-engineered from cooked data (UE 5.6, unversioned):

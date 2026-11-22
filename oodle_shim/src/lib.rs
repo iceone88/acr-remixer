@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+// SPDX-License-Identifier: MIT
+
 //! `OodleLZ_Decompress`-compatible export backed by the open-source
 //! oozextract decompressor (MIT), so acr-stagegen needs no proprietary Oodle
 //! DLL. Same signature as oo2core's: returns the number of bytes written to

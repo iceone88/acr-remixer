@@ -1,4 +1,7 @@
-﻿"""acr-stagegen command line.
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""acr-stagegen command line.
 
     python -m stagegen.cli generate --fake --length 10000 --seed 3 --out out/
     python -m stagegen.cli generate --location WrcgEs --length 8000 --seed 1 --out out/

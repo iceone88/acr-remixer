@@ -1,4 +1,7 @@
-﻿"""Minimal read-only IoStore (.utoc/.ucas) reader for UE 5.x containers (TOC v8).
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Minimal read-only IoStore (.utoc/.ucas) reader for UE 5.x containers (TOC v8).
 
 Only what acr-stagegen needs: list files via the directory index and read a
 chunk's bytes (Oodle-compressed blocks are decoded with a locally installed

@@ -1,4 +1,7 @@
-﻿"""Turn a search result into a flat layout: one centreline, one pacenote list,
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Turn a search result into a flat layout: one centreline, one pacenote list,
 and a manifest of exactly which source slices/transforms were used. The
 manifest is what a future in-game build step consumes."""
 from __future__ import annotations

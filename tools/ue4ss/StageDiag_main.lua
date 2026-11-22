@@ -1,3 +1,6 @@
+-- SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+-- SPDX-License-Identifier: MIT
+
 -- StageDiag: log what the engine thinks about ACR track tiles (acr-stagegen diagnostics)
 local function vec(v)
     if v == nil then return "nil" end

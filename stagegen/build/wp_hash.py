@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """World Partition runtime spatial hash (UE 5.6, cooked, unversioned).
 
     WorldPartitionRuntimeSpatialHash

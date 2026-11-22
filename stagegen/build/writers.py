@@ -1,4 +1,7 @@
-﻿"""Serialisers for the three asset kinds a generated stage rewrites:
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Serialisers for the three asset kinds a generated stage rewrites:
 pacenote DataTable rows, BakedDataContainer meshes and DMSplineComponent curves.
 
 Each writer re-parses the original export to find the byte ranges it

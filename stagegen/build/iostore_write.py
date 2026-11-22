@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Write a small uncompressed IoStore container (.utoc/.ucas) + companion .pak.
 
 Layout mirrors what UE 5.6 mod containers use (TOC v8, flags = Indexed,

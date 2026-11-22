@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Build a recombined base-game (World Partition) stage as a mod container.
 
 What gets rewritten (everything else is still served by the game):

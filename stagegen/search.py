@@ -1,4 +1,7 @@
-﻿"""Beam search that chains segments (via connectors) into a new stage layout."""
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Beam search that chains segments (via connectors) into a new stage layout."""
 from __future__ import annotations
 
 import random

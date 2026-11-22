@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Move a world-space HLOD StaticMesh (the visible track in ACR) in place.
 
 HLOD track meshes (`StaticMesh_N` exports in the main level, one per 350 m

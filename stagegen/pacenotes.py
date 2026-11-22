@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Pacenote generation from centreline geometry.
 
 Used for connectors, reversed segments, and to fake 'original' notes for test

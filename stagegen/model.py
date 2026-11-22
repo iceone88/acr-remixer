@@ -1,4 +1,7 @@
-﻿"""Core data types: source stages, cut segments, end states, placed pieces."""
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Core data types: source stages, cut segments, end states, placed pieces."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+// SPDX-License-Identifier: MIT
+
 //! ACR Remixer GUI (egui; formerly acr-stagegen). Phase 1: drives the Python pipeline
 //! (`python -m stagegen.cli build ...`) and previews the result; the pipeline is
 //! being ported to Rust module by module.

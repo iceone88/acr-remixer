@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Screenshot a built stage at fixed points via the UE4SS StageTest mod.
 
     py tools/acr_shots.py --build out/WalesS4HafrenSouth_seed1 [--every 600] [--install-mod]

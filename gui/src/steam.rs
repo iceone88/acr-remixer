@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+// SPDX-License-Identifier: MIT
+
 //! Find the Assetto Corsa Rally install: Steam path from the registry, then
 //! every library in steamapps/libraryfolders.vdf, then the app folder.
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Instanced (foliage / PCG grass) components: hide instances in place.
 
 Instanced static mesh components serialise their instances as a bulk array of

@@ -1,4 +1,7 @@
-﻿"""Exact, per-class decoding and patching of root scene-component transforms
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Exact, per-class decoding and patching of root scene-component transforms
 in a cooked level (UE 5.6, unversioned properties).
 
 Unversioned property indices count the most-derived class first, so the

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Zen (IoStore) cooked package header parsing for UE 5.6: name map, imports,
 export map. Property data is unversioned, so callers decode export payloads
 with type-specific readers."""

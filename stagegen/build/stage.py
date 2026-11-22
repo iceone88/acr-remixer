@@ -1,4 +1,7 @@
-﻿"""Turn a generated layout into an installable mod container.
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Turn a generated layout into an installable mod container.
 
 The generated stage replaces one existing stage level (by default the WRC
 Generations mod's WrcgEsSS1) through a higher-priority container that holds

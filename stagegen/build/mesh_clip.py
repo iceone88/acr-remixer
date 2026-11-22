@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Hide triangles of a cooked (non-Nanite) UStaticMesh without changing any
 buffer size: dropped triangles are rewritten as degenerate (all three indices
 equal), which the GPU skips.

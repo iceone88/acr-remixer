@@ -1,3 +1,6 @@
+-- SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+-- SPDX-License-Identifier: MIT
+
 -- StageDump (acr-stagegen): list functions/classes that look like session or
 -- stage start entry points, to find what the Free Practice menu calls.
 local here = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("(.*/)")

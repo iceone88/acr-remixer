@@ -1,4 +1,7 @@
-﻿"""Tile-aligned recombination for base-game (World Partition) stages.
+﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
+"""Tile-aligned recombination for base-game (World Partition) stages.
 
 The base game ships every stage's road + terrain pre-split on a square grid
 (`SM_<Level>Track<YY><XX>`, 350 m cells). Pieces are cut exactly where the

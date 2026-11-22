@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-License-Identifier: MIT
+
 """Machine-readable progress for the GUI: lines `@progress <0..1> <phase>` on
 stdout (the GUI shows them as a progress bar instead of log lines)."""
 
