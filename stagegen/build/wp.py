@@ -72,6 +72,10 @@ class WPConfig:
     filler_below: float = 1.5            # m: filler sits this far below the stage terrain
     own_level: str | None = None          # write the level under this name (/Game/Levels/<name>), not over the original
     display_name: str | None = None       # menu name of an own-level stage
+    debug_dup_cells: tuple = ()           # test builds (own level): duplicate these cells (source IDs), unmoved
+    debug_dup_grid: bool = True           # test builds: register the duplicates in the streaming grid
+    debug_dup_same_pkg: bool = False      # test builds: duplicates stream the source cell package (no copy)
+    debug_dup_new_guid: bool = True       # test builds: duplicates get their own cell GUID
     giant_mesh_m: float = 400.0         # m: meshes wider than this are scenery, never moved as props
     bg_clear: float = 2000.0           # m: background (satellite map) mesh hidden this close to the new route
     # foliage, each "move" (follows the piece owning its spot) or "hide" (left out, faster)
@@ -1295,6 +1299,21 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 out_pkgs[path] = (new_path, rename_package(data, ren))
         rep.checks.append(f"own level: {sum(1 for p in new_pkgs if p not in level_paths)} changed assets copied to "
                           f"/Game/Stagegen/{cfg.own_level}/")
+        src_of = {}                                    # out_pkgs key -> source file (for chunk ids)
+        if cfg.debug_dup_cells:
+            from .wp_dup import copy_cell_package, duplicate_cells, new_cell_id
+            new_lp = f"/Game/Levels/{cfg.own_level}"
+            copies = [(src, new_cell_id(src, k)) for k, src in enumerate(cfg.debug_dup_cells)]
+            mp, md = out_pkgs[ws.main]
+            out_pkgs[ws.main] = (mp, duplicate_cells(md, new_lp, copies, cfg.debug_dup_grid, cfg.debug_dup_same_pkg,
+                                                     cfg.debug_dup_new_guid))
+            for src, new in ([] if cfg.debug_dup_same_pkg else copies):
+                cp = next(p for p in ws.cells if p.rsplit("/", 1)[1].split(".")[0] == src)
+                np_, cd = out_pkgs[cp]
+                key = f"{cp}#dup#{new}"
+                out_pkgs[key] = (np_.replace(src, new), copy_cell_package(cd, new_lp, src, new))
+                src_of[key] = cp
+            rep.checks.append(f"debug: duplicated cells {copies}")
         # menu entries: not in this container; installing writes one shared
         # table container for all installed stages from this metadata.
         # Dry run here so a stage that cannot get rows fails at build time.
@@ -1309,7 +1328,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         src_headers: dict = {}
         entries = {}
         for path, (new_path, data) in out_pkgs.items():
-            c, i = fs.index[path]
+            c, i = fs.index[src_of.get(path, path)]
             if id(c) not in src_headers:
                 h_i = next(k for k, x in enumerate(c.chunk_ids) if x[11] == 6)
                 src_headers[id(c)] = CH.parse(c.read_entry(h_i))
@@ -1338,7 +1357,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     rep.packages = len(new_pkgs)
     progress(0.93, "checking the result")
     rep.checks += verify_wp(base + ".utoc", ws, new_pkgs, payloads, rules,
-                            {p: np_ for p, (np_, _) in out_pkgs.items()} if cfg.own_level else None)
+                            {p: np_ for p, (np_, _) in out_pkgs.items() if '#dup#' not in p} if cfg.own_level else None)
     return rep
 
 

@@ -77,6 +77,8 @@ def main():
 
     title = lambda s: "WB_SplashScreen_C" in s.split(",")      # 'press any button' (not the logo intro)
     if a.from_fp:
+        if a.select:
+            select_stage(a.select, press)
         return after_fp(a, py, press, pad, ui())
     s = None
     for attempt in range(2):                             # the game occasionally dies during the intro
@@ -106,7 +108,9 @@ def main():
     for attempt in range(4):                             # Racing tab -> Free Practice, verified
         time.sleep(4)
         press("RB"); time.sleep(2)
-        press("DOWN", 2); press("A")
+        # the tab remembers its last item: go to the top first; other counts as fallback
+        press("UP", 6)
+        press("DOWN", (2, 1, 3, 0)[attempt]); press("A")
         try:
             fp = wait_ui(lambda s: "WB_TimeAttackHubLayout_C" in s, 10, "free practice screen")
             break
