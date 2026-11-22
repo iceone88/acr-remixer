@@ -574,10 +574,17 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     hi_ = next(i for i, e in enumerate(main.exports) if e.name.startswith("WorldPartitionRuntimeSpatialHash"))
     e = main.exports[hi_]
     b = bytearray(payloads[ws.main].get(hi_, main.export_bytes(e)))
-    cell_size, rng = struct.unpack_from("<if", b, 20)
-    if not (1000 <= cell_size <= 10_000_000 and 1000 <= rng <= 10_000_000):
-        raise ValueError(f"unexpected streaming grid layout (cell {cell_size}, range {rng})")
-    struct.pack_into("<f", b, 24, cfg.loading_range_cm)
+    # grid settings: i32 CellSize (cm) then f32 LoadingRange (cm). Their offset
+    # varies (some levels store a grid origin vector in front), so find the
+    # first plausible pair after the property header.
+    k_cell = next((k for k in range(2, min(len(b) - 8, 256))
+                   if 1000 <= struct.unpack_from("<i", b, k)[0] <= 10_000_000
+                   and struct.unpack_from("<i", b, k)[0] % 100 == 0
+                   and 1000.0 <= struct.unpack_from("<f", b, k + 4)[0] <= 10_000_000.0), None)
+    if k_cell is None:
+        raise ValueError("streaming grid settings not found in the spatial hash")
+    cell_size, rng = struct.unpack_from("<if", b, k_cell)
+    struct.pack_into("<f", b, k_cell + 4, cfg.loading_range_cm)
     payloads[ws.main][hi_] = bytes(b)
     if cfg.hlod_visuals:
         # track tiles do not render once moved; keep their cells unloaded so the

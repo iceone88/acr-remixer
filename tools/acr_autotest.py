@@ -42,7 +42,7 @@ def wait_ui(pred, timeout: float, what: str) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", required=True)
-    ap.add_argument("--every", type=float, default=600)
+    ap.add_argument("--every", type=float, default=250)
     ap.add_argument("--drive", action="store_true", help="autopilot drive-through instead of the camera tour")
     a = ap.parse_args()
     import vgamepad as vg

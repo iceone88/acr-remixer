@@ -62,7 +62,7 @@ def points_for(build_dir: str, every: float):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", required=True)
-    ap.add_argument("--every", type=float, default=600)
+    ap.add_argument("--every", type=float, default=250)
     ap.add_argument("--out", default=os.path.join(os.environ.get("TEMP", "."), "acrshots", "sheet"))
     ap.add_argument("--timeout", type=float, default=1800)
     ap.add_argument("--prepare", action="store_true", help="only install the mod and write the points")
@@ -113,8 +113,8 @@ def main():
     if not got:
         print("no shots"); return
     from PIL import Image, ImageDraw
-    cols = 3
-    w, h = 480, 270
+    cols = 5
+    w, h = 384, 216
     sheet = Image.new("RGB", (cols * w, ((len(got) + cols - 1) // cols) * h), "black")
     for k, (lab, path) in enumerate(got):
         im = Image.open(path).resize((w, h))
