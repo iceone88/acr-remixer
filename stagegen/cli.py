@@ -13,8 +13,16 @@ import time
 from .connector import max_abs_grade
 from .fake import fake_location, self_clear
 from .layout import build_layout, to_json
-from .plot import plot_layout
 from .search import SearchConfig, search
+
+
+def plot_layout(*args, **kw):
+    """PNG preview (matplotlib, optional: release builds leave it out; the GUI draws its own)."""
+    try:
+        from .plot import plot_layout as _p
+    except ImportError:
+        return
+    _p(*args, **kw)
 from .segments import CutConfig, cut_stage
 
 # Real roads are twistier than the synthetic ones: accept cuts on gentler
@@ -102,10 +110,13 @@ def _build_wp(a, paks: str) -> int:
         setattr(cfg, k, val)
         print(f"  option {k} = {val!r}")
     rep = build_wp_stage(layout, best, cuts, grid, ws, paks, out, cfg)
-    from .build.preview import render_collision
-    fwd = next(p for p, k in ws.route_cells.items() if k == "fwd")
-    render_collision(rep.out_files[0], ws.baked, fwd, os.path.join(out, "collision.png"),
-                     f"{a.level} seed {a.seed}: built collision (start o, finish #)")
+    try:
+        from .build.preview import render_collision
+        fwd = next(p for p, k in ws.route_cells.items() if k == "fwd")
+        render_collision(rep.out_files[0], ws.baked, fwd, os.path.join(out, "collision.png"),
+                         f"{a.level} seed {a.seed}: built collision (start o, finish #)")
+    except ImportError:
+        pass                                       # no matplotlib (release build)
     print(f"placed at offset {tuple(float(x) for x in rep.offset)} m; {rep.packages} packages rewritten; moved " +
           ", ".join(f"{k} {v}" for k, v in rep.moved.most_common(12)))
     for r in rep.relocated:
@@ -266,6 +277,7 @@ def main(argv=None):
     if a.cmd == "install":
         return _install(a)
     if a.cmd == "uninstall":
+        _stop_game()
         return _uninstall(a)
 
     if a.cmd == "list":

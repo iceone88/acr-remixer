@@ -16,18 +16,25 @@ from functools import lru_cache
 MAGIC = b"-==--==--==--==-"
 
 # Oodle 2.9 is needed for UE 5.6 Kraken streams (2.4 cannot decode them).
-# Only DLLs already on this machine are used; set ACR_OODLE_DLL to override.
+# ACR_OODLE_DLL overrides; then a real oo2core already on this machine (faster);
+# then the open-source shim (oodle_shim: oozextract, MIT), which releases bundle.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_BUNDLE = getattr(__import__("sys"), "_MEIPASS", None)
 OODLE_CANDIDATES = [
     os.environ.get("ACR_OODLE_DLL", ""),
     r"E:\Sando-Rally-Stage-Export-Tool\bin\retoc\oo2core_9_win64.dll",
     r"E:\_old_exports\bin\retoc\oo2core_9_win64.dll",
-    r"D:\ME\Mass Effect Legendary Edition\Game\ME3\Binaries\Win64\oo2core_8_win64.dll",
+    os.path.join(_BUNDLE, "oo2core_shim.dll") if _BUNDLE else "",
+    os.path.join(_HERE, "..", "..", "oodle_shim", "target", "release", "oo2core_shim.dll"),
 ]
 
 
 @lru_cache(maxsize=1)
 def _oodle():
-    for p in OODLE_CANDIDATES:
+    cands = OODLE_CANDIDATES
+    if os.environ.get("ACR_OODLE_DLL") == "shim":          # test the open-source path only
+        cands = [p for p in OODLE_CANDIDATES if p.endswith("oo2core_shim.dll")]
+    for p in cands:
         if p and os.path.isfile(p):
             dll = ctypes.WinDLL(p)
             f = dll.OodleLZ_Decompress
@@ -37,7 +44,7 @@ def _oodle():
                           ctypes.c_void_p, ctypes.c_int64, ctypes.c_void_p, ctypes.c_void_p,
                           ctypes.c_void_p, ctypes.c_int64, ctypes.c_int]
             return f
-    raise RuntimeError("No oo2core_*_win64.dll found; set ACR_OODLE_DLL")
+    raise RuntimeError("No Oodle decompressor found (build oodle_shim or set ACR_OODLE_DLL)")
 
 
 def oodle_decompress(src: bytes, raw_size: int) -> bytes:
