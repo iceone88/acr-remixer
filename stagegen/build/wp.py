@@ -72,6 +72,7 @@ class WPConfig:
     filler_below: float = 1.5            # m: filler sits this far below the stage terrain
     own_level: str | None = None          # write the level under this name (/Game/Levels/<name>), not over the original
     display_name: str | None = None       # menu name of an own-level stage
+    build_params: dict | None = None      # how it was built (stored with it: regenerate / load settings)
     debug_dup_cells: tuple = ()           # test builds (own level): duplicate these cells (source IDs), unmoved
     debug_dup_grid: bool = True           # test builds: register the duplicates in the streaming grid
     debug_dup_same_pkg: bool = False      # test builds: duplicates stream the source cell package (no copy)
@@ -1430,7 +1431,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         import json
         from .tables import STAGE_META, stage_entries
         meta = {"level": lvl, "name": cfg.own_level, "display": cfg.display_name or f"Stagegen {cfg.own_level}",
-                "length_km": round(layout.length / 1000, 2)}
+                "length_km": round(layout.length / 1000, 2), "params": cfg.build_params or {}}
         _, tnotes = stage_entries(GameFS(paks_dir, include_mods=True), lvl, meta["name"], meta["display"])
         with open(os.path.join(out_dir, pak_name + STAGE_META), "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=1)

@@ -180,6 +180,11 @@ def _build_wp(a, paks: str) -> int:
         cfg.display_name = (f"{_pretty(a.level)} · custom {_seq_tag(a)} · {layout.length / 1000:.1f} km"
                             if getattr(a, "sequence", None) else
                             f"{_pretty(a.level)} · seed {a.seed} · {layout.length / 1000:.1f} km")
+        # how to build it again (stored with the installed stage: regenerate / load settings)
+        cfg.build_params = {"level": a.level, "length": a.length, "seed": a.seed,
+                            "max_uses": getattr(a, "max_uses", 1), "sequence": getattr(a, "sequence", None) or "",
+                            "forest": not getattr(a, "no_forest", False), "grass": not getattr(a, "no_grass", False),
+                            "foliage": not getattr(a, "no_foliage", False)}
     if getattr(a, "no_forest", False):
         cfg.forest = "hide"
     if getattr(a, "no_grass", False):
@@ -314,6 +319,10 @@ def _install(a) -> int:
         if os.path.exists(base + ext):
             shutil.copy2(base + ext, mods)
             print("installed", os.path.join(mods, name + ext))
+    # the map of the stage, for the GUI's list of installed stages (the game ignores it)
+    lay = os.path.join(a.build_dir, "layout.json")
+    if os.path.exists(lay) and os.path.exists(base + ".stagegen.json"):
+        shutil.copy2(lay, os.path.join(mods, name + ".layout.json"))
     return _refresh_tables(a)
 
 

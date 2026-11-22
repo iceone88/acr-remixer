@@ -121,6 +121,25 @@ struct Installed {
     name: String,
     /// menu name; None for an old build that replaces the original stage
     display: Option<String>,
+    /// how it was built (level, length, seed, max_uses, sequence, foliage); None for older builds
+    params: Option<serde_json::Value>,
+    /// its map (layout.json copied into ~mods at install), if there
+    layout: Option<PathBuf>,
+}
+
+/// Settings with an installed stage's build parameters applied.
+fn prefs_with_params(base: &Prefs, params: &serde_json::Value) -> Prefs {
+    let mut p = base.clone();
+    if let Some(s) = params["level"].as_str() { p.stage = s.to_string(); }
+    if let Some(v) = params["length"].as_f64() { p.length_m = v as f32; }
+    if let Some(v) = params["seed"].as_u64() { p.seed = v as u32; }
+    p.max_uses = params["max_uses"].as_u64().unwrap_or(1) as u32;
+    p.sequence = params["sequence"].as_str().unwrap_or("").to_string();
+    p.use_sequence = !p.sequence.trim().is_empty();
+    p.forest = params["forest"].as_bool().unwrap_or(true);
+    p.grass = params["grass"].as_bool().unwrap_or(true);
+    p.foliage = params["foliage"].as_bool().unwrap_or(true);
+    p
 }
 
 /// Generated stages installed in ~mods (the shared menu-table container excluded).
@@ -132,10 +151,12 @@ fn installed_stages(acr_dir: &str) -> Vec<Installed> {
         let name = n.strip_prefix("pakchunk99-")?.strip_suffix("_Stagegen_9_P.utoc")?.to_string();
         if name == "Tables" { return None; }
         let meta = mods.join(format!("pakchunk99-{name}_Stagegen_9_P.stagegen.json"));
-        let display = std::fs::read_to_string(meta).ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|j| j["display"].as_str().map(|s| s.to_string()));
-        Some(Installed { name, display })
+        let j = std::fs::read_to_string(meta).ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+        let display = j.as_ref().and_then(|j| j["display"].as_str().map(|s| s.to_string()));
+        let params = j.as_ref().map(|j| j["params"].clone()).filter(|p| p.is_object());
+        let layout = Some(mods.join(format!("pakchunk99-{name}_Stagegen_9_P.layout.json"))).filter(|p| p.is_file());
+        Some(Installed { name, display, params, layout })
     }).collect();
     v.sort_by(|a, b| a.name.cmp(&b.name));
     v
@@ -312,7 +333,12 @@ struct Preview {
 }
 
 fn load_preview(dir: &Path) -> Result<Preview, String> {
-    let txt = std::fs::read_to_string(dir.join("layout.json")).map_err(|e| e.to_string())?;
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    load_preview_file(&dir.join("layout.json"), name)
+}
+
+fn load_preview_file(file: &Path, name: String) -> Result<Preview, String> {
+    let txt = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&txt).map_err(|e| e.to_string())?;
     let pts: Vec<[f64; 3]> = v["preview"]
         .as_array()
@@ -345,7 +371,7 @@ fn load_preview(dir: &Path) -> Result<Preview, String> {
         })
         .unwrap_or_default();
     Ok(Preview {
-        name: dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        name,
         length: v["length_m"].as_f64().unwrap_or(*s.last().unwrap()),
         notes: v["pacenotes"].as_array().map(|a| a.len()).unwrap_or(0),
         pts,
@@ -379,6 +405,21 @@ struct App {
     blocked: bool,
     /// share-code text field (paste a code here to load it)
     code_input: String,
+    /// settings of the running build job when they are not the form's (regenerate)
+    job_prefs: Option<Prefs>,
+    /// installed stage shown on the map (level name)
+    shown_installed: Option<String>,
+    /// feedback next to the share section ("Copied: ...")
+    share_note: Option<String>,
+}
+
+/// What was clicked in the list of installed stages.
+enum InstAction {
+    Show(Installed),
+    Load(Installed),
+    Share(Installed),
+    Regenerate(Installed),
+    Uninstall(String),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -392,7 +433,8 @@ impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
         let mut app = App { prefs, log: String::new(), job: None, preview: None, tab: Tab::Map,
-                            installed: vec![], blocked: false, code_input: String::new() };
+                            installed: vec![], blocked: false, code_input: String::new(), job_prefs: None,
+                            shown_installed: None, share_note: None };
         app.preview = load_preview(&app.out_for(app.prefs.seed)).ok();     // reopen the last stage
         app.refresh_install_state();
         app
@@ -413,8 +455,42 @@ impl App {
         self.tab = Tab::Log;
         let (_, rx) = channel();
         let total = seeds.len();
+        self.job_prefs = None;
         self.job = Some(Job { rx, remaining: seeds, total, progress: 0.0, phase: "starting".into() });
         self.next();
+    }
+
+    /// Build an installed stage again with its own parameters and reinstall it
+    /// (e.g. after an update with fixes); the form is left as it is.
+    fn regenerate(&mut self, inst: &Installed) {
+        let Some(params) = &inst.params else { return };
+        let mut p = prefs_with_params(&self.prefs, params);
+        p.install = true;
+        p.launch = false;
+        p.batch = 1;
+        self.log.clear();
+        self.log.push_str(&format!("regenerating {}\n", inst.display.as_deref().unwrap_or(&inst.name)));
+        self.tab = Tab::Log;
+        let (_, rx) = channel();
+        let seed = p.seed;
+        self.job_prefs = Some(p);
+        self.job = Some(Job { rx, remaining: vec![seed], total: 1, progress: 0.0, phase: "starting".into() });
+        self.next();
+    }
+
+    /// Show an installed stage's map.
+    fn show_installed(&mut self, inst: &Installed) {
+        let Some(file) = &inst.layout else { return };
+        match load_preview_file(file, inst.display.clone().unwrap_or_else(|| inst.name.clone())) {
+            Ok(pv) => {
+                self.preview = Some(pv);
+                self.shown_installed = Some(inst.name.clone());
+                if self.tab == Tab::Log {
+                    self.tab = Tab::Map;
+                }
+            }
+            Err(e) => self.log.push_str(&format!("map of {}: {e}\n", inst.name)),
+        }
     }
 
     /// Launch the build for the next seed of the batch (install/launch only on the last).
@@ -425,7 +501,7 @@ impl App {
             return;
         };
         let last = job.remaining.is_empty();
-        let p = self.prefs.clone();
+        let p = self.job_prefs.clone().unwrap_or_else(|| self.prefs.clone());
         let mut args: Vec<String> = vec![
             "build".into(),
             "--level".into(), p.stage.clone(),
@@ -676,28 +752,21 @@ impl eframe::App for App {
                     let replaces = list.iter().any(|i| i.display.is_none());
                     ui.colored_label(egui::Color32::from_rgb(230, 150, 40),
                         if replaces {
-                            "⚠ Generated stages installed (one replaces its original stage). Play offline."
+                            format!("⚠ {} generated stage(s) installed (one replaces its original stage). Play offline.",
+                                    list.len())
                         } else {
-                            "Generated stages installed: extra stages in Free Practice under their rally. Play offline."
+                            format!("{} generated stage(s) installed: extra stages in Free Practice under their rally \
+                                     (list on the left). Play offline.", list.len())
                         });
                     if self.blocked {
                         ui.colored_label(egui::Color32::from_rgb(90, 180, 90), "🔒 ACR online blocked");
                     } else if !busy && ui.small_button("Block ACR online").clicked() {
                         do_block = true;
                     }
-                    if list.len() > 1 && !busy && ui.small_button("Uninstall all").clicked() {
+                    if !busy && ui.small_button("Uninstall all").clicked() {
                         do_uninstall = Some(None);
                     }
                 });
-                for i in &list {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("  • {}", i.display.clone()
-                            .unwrap_or_else(|| format!("{} (replaces the original stage)", i.name))));
-                        if !busy && ui.small_button("Uninstall").clicked() {
-                            do_uninstall = Some(Some(i.name.clone()));
-                        }
-                    });
-                }
                 ui.add_space(4.0);
             });
             if do_block {
@@ -711,8 +780,10 @@ impl eframe::App for App {
 
         let mut block_changed = false;
         let mut want_segments = false;
+        let mut inst_action: Option<InstAction> = None;
         let pv_seq = self.preview.as_ref().map(|pv| pv.sequence.clone()).filter(|s| !s.is_empty());
         egui::SidePanel::left("opts").min_width(330.0).show(ctx, |ui| {
+          egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.heading("ACR Remixer");
             ui.add_space(6.0);
             egui::CollapsingHeader::new("Setup").default_open(self.prefs.acr_dir.is_empty()).show(ui, |ui| {
@@ -830,13 +901,55 @@ impl eframe::App for App {
                     }
                 }
             });
-            if !busy
-                && !self.installed.is_empty()
-                && ui.add_enabled(ready, egui::Button::new("Uninstall all generated stages"))
-                    .on_hover_text("Remove every generated stage from the game (closes ACR)")
-                    .clicked()
-            {
-                self.uninstall(None);
+            if !self.installed.is_empty() {
+                ui.separator();
+                egui::CollapsingHeader::new(format!("Installed stages ({})", self.installed.len()))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let list = self.installed.clone();
+                        for inst in &list {
+                            let label = inst.display.clone()
+                                .unwrap_or_else(|| format!("{} (replaces the original)", inst.name));
+                            let shown = self.shown_installed.as_deref() == Some(inst.name.as_str());
+                            let old = "built with an older version: rebuild it from the form";
+                            ui.horizontal(|ui| {
+                                if ui.add_enabled(inst.layout.is_some(), egui::SelectableLabel::new(shown, &label))
+                                    .on_hover_text("Show its map").on_disabled_hover_text("no map stored (older build)")
+                                    .clicked()
+                                {
+                                    inst_action = Some(InstAction::Show(inst.clone()));
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_space(12.0);
+                                let has = inst.params.is_some();
+                                if ui.add_enabled(has, egui::Button::new("✎ Load").small())
+                                    .on_hover_text("Put its settings into the form, to vary them")
+                                    .on_disabled_hover_text(old).clicked()
+                                {
+                                    inst_action = Some(InstAction::Load(inst.clone()));
+                                }
+                                if ui.add_enabled(has, egui::Button::new("📋 Share").small())
+                                    .on_hover_text("Copy its share code: anyone with ACR Remixer gets the same stage")
+                                    .on_disabled_hover_text(old).clicked()
+                                {
+                                    inst_action = Some(InstAction::Share(inst.clone()));
+                                }
+                                if ui.add_enabled(has && !busy && ready, egui::Button::new("⟳ Regenerate").small())
+                                    .on_hover_text("Build it again with the same settings and reinstall it \
+                                                    (e.g. after an update with fixes; closes ACR)")
+                                    .on_disabled_hover_text(old).clicked()
+                                {
+                                    inst_action = Some(InstAction::Regenerate(inst.clone()));
+                                }
+                                if ui.add_enabled(!busy && ready, egui::Button::new("🗑 Uninstall").small())
+                                    .on_hover_text("Remove it from the game (closes ACR)").clicked()
+                                {
+                                    inst_action = Some(InstAction::Uninstall(inst.name.clone()));
+                                }
+                            });
+                        }
+                    });
             }
             if !VERIFIED.contains(&self.prefs.stage.as_str()) {
                 ui.colored_label(egui::Color32::from_rgb(230, 170, 60), "Experimental stage: not yet verified in-game.");
@@ -847,26 +960,37 @@ impl eframe::App for App {
                                  pv.joins.len() + 1, pv.notes));
             }
             ui.separator();
-            egui::CollapsingHeader::new("Share & bug report").show(ui, |ui| {
-                let code = share_code(&self.prefs);
-                ui.horizontal(|ui| {
-                    ui.label("Share code:");
-                    ui.monospace(&code);
-                    if ui.small_button("Copy").on_hover_text("Same code = same stage for anyone").clicked() {
-                        ui.ctx().copy_text(code.clone());
+            ui.separator();
+            ui.strong("🔗 Share a stage");
+            ui.label("A code is all a friend needs: same code = same stage on their PC.");
+            let code = share_code(&self.prefs);
+            ui.horizontal(|ui| {
+                ui.label("This form:");
+                ui.monospace(&code);
+                if ui.small_button("📋 Copy").on_hover_text("Copy the code of the stage set up in the form").clicked() {
+                    ui.ctx().copy_text(code.clone());
+                    self.share_note = Some(format!("Copied: {code}"));
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.code_input).hint_text("paste a code from a friend")
+                    .desired_width(220.0));
+                if ui.add_enabled(!busy, egui::Button::new("Load")).on_hover_text("Fill the form from the code; \
+                    then press Generate").clicked()
+                {
+                    let input = self.code_input.clone();
+                    match apply_share_code(&mut self.prefs, &input) {
+                        Ok(()) => self.share_note = Some(format!("Loaded {} - press Generate", input.trim())),
+                        Err(e) => self.share_note = Some(format!("Not a valid code: {e}")),
                     }
-                });
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.code_input).hint_text("paste a share code")
-                        .desired_width(220.0));
-                    if ui.add_enabled(!busy, egui::Button::new("Load")).clicked() {
-                        let input = self.code_input.clone();
-                        match apply_share_code(&mut self.prefs, &input) {
-                            Ok(()) => self.log.push_str(&format!("loaded share code {}\n", input.trim())),
-                            Err(e) => self.log.push_str(&format!("share code: {e}\n")),
-                        }
-                    }
-                });
+                }
+            });
+            if let Some(n) = &self.share_note {
+                ui.small(n);
+            }
+            ui.small("Installed stages have their own 📋 Share button in the list above.");
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new("Bug report").show(ui, |ui| {
                 if ui.button("Export bug report").on_hover_text(
                     "Writes one text file (settings, last log, ACR crash reports; your user name is hidden) \
                      to attach to a bug report").clicked()
@@ -881,6 +1005,7 @@ impl eframe::App for App {
                 }
                 ui.small(format!("ACR Remixer {VERSION}"));
             });
+          });
         });
 
         if block_changed && !busy {
@@ -888,6 +1013,33 @@ impl eframe::App for App {
         }
         if want_segments && !busy {
             self.list_segments();
+        }
+        match inst_action {
+            Some(InstAction::Show(i)) => self.show_installed(&i),
+            Some(InstAction::Load(i)) => {
+                if let Some(params) = &i.params {
+                    self.prefs = prefs_with_params(&self.prefs, params);
+                    self.log.push_str(&format!("settings of {} loaded into the form\n",
+                                               i.display.as_deref().unwrap_or(&i.name)));
+                }
+                self.show_installed(&i);
+            }
+            Some(InstAction::Share(i)) => {
+                if let Some(params) = &i.params {
+                    let code = share_code(&prefs_with_params(&self.prefs, params));
+                    ctx.copy_text(code.clone());
+                    self.log.push_str(&format!("share code copied: {code}\n"));
+                    self.share_note = Some(format!("Copied: {code}"));
+                }
+            }
+            Some(InstAction::Regenerate(i)) => self.regenerate(&i),
+            Some(InstAction::Uninstall(name)) => {
+                if self.shown_installed.as_deref() == Some(name.as_str()) {
+                    self.shown_installed = None;
+                }
+                self.uninstall(Some(name));
+            }
+            None => {}
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
