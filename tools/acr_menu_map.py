@@ -31,7 +31,8 @@ def main(steps):
             focus()
             b = getattr(vg.XUSB_BUTTON, BUTTONS[name])
             for _ in range(int(n or 1)):
-                pad.press_button(button=b); pad.update(); time.sleep(0.25)
+                pad.press_button(button=b); pad.update()
+            time.sleep(0.06 if "DPAD" in BUTTONS[name] else 0.25)   # a longer D-pad hold counts twice in carousels
                 pad.release_button(button=b); pad.update(); time.sleep(0.7)
             time.sleep(2.0)
         print(f"{step:8s} -> {ui()}", flush=True)

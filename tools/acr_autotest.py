@@ -71,7 +71,8 @@ def main():
         focus()
         b = getattr(vg.XUSB_BUTTON, BUTTONS[name])
         for _ in range(n):
-            pad.press_button(button=b); pad.update(); time.sleep(0.25)
+            pad.press_button(button=b); pad.update()
+            time.sleep(0.06 if "DPAD" in BUTTONS[name] else 0.25)   # a longer D-pad hold counts twice in carousels
             pad.release_button(button=b); pad.update(); time.sleep(0.8)
 
     title = lambda s: "WB_SplashScreen_C" in s.split(",")      # 'press any button' (not the logo intro)
@@ -132,10 +133,14 @@ def select_stage(spec: str, press):
     time.sleep(2)
     press("UP", 2); press("LEFT"); press("A")
     wait_ui(lambda s: "WB_TrackPage_C" in s, 20, "rally selection")
-    time.sleep(1.5)
-    press("LEFT", 10); press("RIGHT", r); press("A")
-    time.sleep(1.5)
-    press("LEFT", 3); press("RIGHT", t); press("A")
+    time.sleep(2.0)
+
+    def slow(name, n):                       # the carousels drop presses while they scroll
+        for _ in range(n):
+            press(name); time.sleep(0.7)
+    slow("LEFT", 12); slow("RIGHT", r); press("A")
+    time.sleep(2.0)
+    slow("LEFT", 4); slow("RIGHT", t); press("A")
     time.sleep(1.0)
     press("DOWN"); press("A")
     s = wait_ui(lambda s: "WB_TimeAttackHubLayout_C" in s, 20, "free practice after selecting the stage")

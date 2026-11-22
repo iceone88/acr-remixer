@@ -121,7 +121,14 @@ end
 local function restart() state, points, i, t, done = "wait_car", nil, 0, 0, false end
 StageTestAPI = { console = console, place = place, restart = restart, insts = insts, inst = inst }
 
+-- nothing touches the game in the first seconds: scheduling game-thread
+-- callbacks during the logo intro crashed UE4SS natively (only with bigger
+-- mod containers mounted, e.g. a generated Elatia)
+local T0 = os.time()
+local function warm() return os.time() - T0 >= 20 end
+
 LoopAsync(500, function()
+    if not warm() then return false end
     ExecuteInGameThread(function()
         local ok, err = pcall(step)
         if not ok then print("[StageTest] error: " .. tostring(err) .. "\n") end
@@ -129,11 +136,8 @@ LoopAsync(500, function()
     return false
 end)
 
-local T0 = os.time()
 LoopAsync(1000, function()
-    -- querying the UI widgets while the engine is still constructing them
-    -- (logo intro) occasionally crashed UE4SS natively: start a little later
-    if os.time() - T0 < 15 then return false end
+    if not warm() then return false end
     ExecuteInGameThread(function()
         local act = {}
         pcall(function()
@@ -154,6 +158,7 @@ end)
 
 local live_src = nil
 LoopAsync(1000, function()
+    if not warm() then return false end
     local f = io.open(LIVE, "r")
     if f then
         local src = f:read("*a"); f:close()

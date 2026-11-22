@@ -37,7 +37,7 @@ from . import writers as W
 from .cityhash import name_hash
 from .iostore_write import ChunkIn, container_header_chunk_id, retarget_container_header, write_container
 from .level import decode_components, learn_rules, patched_payload
-from .mesh_clip import clip_mesh_payload, displace_payload, mesh_export_index
+from .mesh_clip import clip_mesh_payload, displace_payload, find_lods, mesh_export_index
 from .wp_hash import all_cells_in_top_level, drop_cells, widen_cell_data
 from ..progress import progress, span
 from .foliage import hide_instances, move_hism
@@ -197,36 +197,57 @@ def _filler_height_field(surf, pieces, tree_new, tree_new_all, seam_dz, new_cl, 
     return lambda xy: f(np.atleast_2d(xy)[:, :2])
 
 
-def _component_transform_for_mesh(pk: Package, mesh_pkg_path: str):
-    """(RelativeLocation cm, RelativeScale3D) of the StaticMeshComponent in pk that
-    draws the mesh package mesh_pkg_path (via imported package names -> import map).
-    StaticMeshComponent props here: 4 StaticMesh (i32), 42 OverrideMaterials
-    (i32 count + i32 each), 163 location, 164 rotation, 165 scale (3 doubles each)."""
+def _component_transforms_for_mesh(pk: Package, mesh_pkg_path: str) -> list:
+    """Every placement of the mesh package mesh_pkg_path by a StaticMeshComponent
+    in pk (via imported package names -> import map): [(location cm, yaw deg,
+    scale)]. StaticMeshComponent props here: 4 StaticMesh (i32), 42
+    OverrideMaterials (i32 count + i32 each), 163 location, 164 rotation
+    (pitch, yaw, roll), 165 scale (3 doubles each)."""
     from ..extract.unversioned import Reader
     from ..extract.zen import read_name_batch
     game = "/Game/" + mesh_pkg_path.split("/Content/", 1)[1].rsplit(".", 1)[0]
     names, _ = read_name_batch(pk.d, pk.imported_pkg_names_off)
     if game not in names:
-        return None
+        return []
     k = names.index(game)
-    imps = [i for i, v in enumerate(pk.imports) if (v >> 62) == 2 and ((v >> 32) & 0x3FFFFFFF) == k]
-    for i in imps:
-        for e in pk.exports:
-            b = pk.export_bytes(e)
-            r = Reader(pk.d, e.data_offset)
+    refs = {-(i + 1) for i, v in enumerate(pk.imports) if (v >> 62) == 2 and ((v >> 32) & 0x3FFFFFFF) == k}
+    out = []
+    for e in pk.exports:
+        b = pk.export_bytes(e)
+        r = Reader(pk.d, e.data_offset)
+        try:
             pres, _ = r.header_full()
-            q = r.p - e.data_offset
-            if not pres or pres[0] != 4 or struct.unpack_from("<i", b, q)[0] != -(i + 1):
-                continue
-            q += 4
-            if 42 in pres:
-                q += 4 + 4 * struct.unpack_from("<i", b, q)[0]
-            loc = np.array(struct.unpack_from("<3d", b, q)) if 163 in pres else np.zeros(3)
-            q += 24 if 163 in pres else 0
-            q += 24 if 164 in pres else 0
-            scale = np.array(struct.unpack_from("<3d", b, q)) if 165 in pres else np.ones(3)
-            return loc, scale
-    return None
+        except Exception:
+            continue
+        q = r.p - e.data_offset
+        if not pres or pres[0] != 4 or q + 4 > len(b) or struct.unpack_from("<i", b, q)[0] not in refs:
+            continue
+        q += 4
+        if 42 in pres:
+            q += 4 + 4 * struct.unpack_from("<i", b, q)[0]
+        loc = np.array(struct.unpack_from("<3d", b, q)) if 163 in pres else np.zeros(3)
+        q += 24 if 163 in pres else 0
+        yaw = struct.unpack_from("<3d", b, q)[1] if 164 in pres else 0.0
+        q += 24 if 164 in pres else 0
+        scale = np.array(struct.unpack_from("<3d", b, q)) if 165 in pres else np.ones(3)
+        out.append((loc, float(yaw), scale))
+    return out
+
+
+def _background_meshes(fs, main: Package) -> list[str]:
+    """Background mesh packages placed by the main level: imported static meshes
+    with BG in the name (SM_S4HafrensSouthBG2, SM_ElatiaExtraBG04, SM_BGSet7_new)."""
+    import re as _re
+    from ..extract.zen import read_name_batch
+    names, _ = read_name_batch(main.d, main.imported_pkg_names_off)
+    out = []
+    for n in names:
+        leaf = n.rsplit("/", 1)[-1]
+        if n.startswith("/Game/Environments/") and _re.match(r"SM_.*BG", leaf):
+            p = "acr/Content/" + n[len("/Game/"):] + ".uasset"
+            if p in fs.index:
+                out.append(p)
+    return out
 
 
 def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid, ws: WPSource,
@@ -687,25 +708,34 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     # world space): near the new stage they cut through or float above it
     if cfg.bg_clear > 0:
         cl_tree = cKDTree(new_cl[:, :2])
-        for p in sorted(x for x in fs.index if f"/Environments/{lvl}/Backgrounds/SM_" in x and x.endswith(".uasset")):
-            tf = _component_transform_for_mesh(main, p)
-            if tf is None:
-                rep.checks.append(f"background {p.rsplit('/', 1)[-1]}: placing component not found"); continue
-            loc_cm, scale = tf
+        n_bg = 0
+        for p in _background_meshes(fs, main):
+            places = _component_transforms_for_mesh(main, p)
+            if not places:
+                continue
             mpk = Package(fs.read(p))
             mi = mesh_export_index(mpk)
             mb = mpk.export_bytes(mpk.exports[mi])
-            lo_, hi_ = mesh_world_bounds(mb)
-            wb = (lo_ * scale + loc_cm, hi_ * scale + loc_cm)
+
+            def far_everywhere(cen, places=places):
+                keep = np.ones(len(cen), bool)
+                for L, yaw, S in places:            # hidden if near the route in any placement
+                    c, s = np.cos(np.radians(yaw)), np.sin(np.radians(yaw))
+                    P = cen * S
+                    w = np.c_[c * P[:, 0] - s * P[:, 1], s * P[:, 0] + c * P[:, 1]] + L[:2]
+                    keep &= cl_tree.query(w / 100)[0] > cfg.bg_clear
+                return keep
             try:
-                nb, st = clip_mesh_payload(
-                    mb, lambda cen, L=loc_cm, S=scale: cl_tree.query((cen * S + L)[:, :2] / 100)[0] > cfg.bg_clear)
-            except ValueError as ex_:
-                rep.checks.append(f"background {p.rsplit('/', 1)[-1]}: not clipped ({ex_})"); continue
-            new_pkgs[p] = rewrite_package(mpk, {mi: nb})
-            rep.checks.append(f"background {p.rsplit('/', 1)[-1]}: {st['dropped']}/{st['tris']} triangles within "
-                              f"{cfg.bg_clear:.0f} m of the new route hidden; bounds "
-                              f"{np.round(wb[0] / 100) if wb else '?'}..{np.round(wb[1] / 100) if wb else '?'} m")
+                nb, st = clip_mesh_payload(mb, far_everywhere)
+            except ValueError:
+                continue
+            if st["dropped"]:
+                new_pkgs[p] = rewrite_package(mpk, {mi: nb})
+                n_bg += 1
+                rep.checks.append(f"background {p.rsplit('/', 1)[-1]} ({len(places)} placed): "
+                                  f"{st['dropped']}/{st['tris']} triangles within {cfg.bg_clear:.0f} m hidden")
+        if not n_bg:
+            rep.checks.append("background: nothing near the new route")
 
     if cfg.hide_unused_tiles and not cfg.debug_no_clip:
         n_un = 0
@@ -754,6 +784,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         return w
 
     filler_h = None
+    filler_vis = []
     if cfg.filler:
         filler_h = _filler_height_field(
             surf, pieces, tree_new, tree_new_all, seam_dz, new_cl,
@@ -779,8 +810,38 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 return filler_h(src[:, :2] + filler_shift) * 100 - pv[2] - P[:, 2]
             nb, mx = displace_payload(mpk.export_bytes(mpk.exports[mi]), to_h)
             new_pkgs[p] = rewrite_package(mpk, {mi: nb})
+            # visual check: final filler vertices (LOD0) in world space
+            lod0 = find_lods(nb)[0]
+            Pn = np.frombuffer(nb, "<f4", 3 * lod0.n, lod0.pos_off).reshape(-1, 3).astype(np.float64)
+            srcn = (Pn + pivot) / 100
+            if bd_piece is not None:
+                Wn = srcn @ pieces[bd_piece].R.T + pieces[bd_piece].t
+            else:
+                Wn = srcn.copy(); Wn[:, :2] += filler_shift
+            filler_vis.append(Wn)
         rep.checks.append(f"filler ground: {len(bd_pivot)} tiles reshaped to the stage height field "
                           f"({cfg.filler_below:.1f} m below the stage terrain)")
+    if filler_vis:
+        Fv = np.vstack(filler_vis)
+        ftree = cKDTree(Fv[:, :2])
+        rp = resample(new_cl, 10.0)
+        above = []
+        for k_r, p_r in enumerate(rp):
+            ii = ftree.query_ball_point(p_r[:2], 6.0)
+            if ii and Fv[ii, 2].max() > p_r[2] + 1.0:
+                above.append((k_r * 10.0, Fv[ii, 2].max() - p_r[2]))
+        if above:
+            runs, a0, mx_ = [], above[0][0], 0.0
+            for (x0, h0), nxt in zip(above, above[1:] + [(None, 0)]):
+                mx_ = max(mx_, h0)
+                if nxt[0] is None or nxt[0] - x0 > 10.0:
+                    runs.append((a0, x0, mx_)); a0, mx_ = nxt[0], 0.0
+            rep.checks.append("FILLER ABOVE ROAD (visual): " + ", ".join(
+                f"{r0:.0f}-{r1:.0f} m (+{h:.0f} m)" for r0, r1, h in runs[:8]))
+        else:
+            rep.checks.append("filler ground: below the road everywhere")
+    if cfg.filler:
+        pass
     elif bd_piece is not None and not cfg.debug_no_clip:
         for name, pivot in bd_pivot.items():
             p = next((x for x in fs.index if x.endswith(f"/{name}.uasset") and "/MeshesTerrain/" in x), None)
