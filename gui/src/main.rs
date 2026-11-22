@@ -64,6 +64,11 @@ struct Prefs {
     length_m: f32,
     seed: u32,
     batch: u32,
+    /// how often a piece of road may appear (>1: longer stages from repeats)
+    max_uses: u32,
+    /// build `sequence` (pieces like "0-1 7-11 2-7r 18-19") instead of searching
+    use_sequence: bool,
+    sequence: String,
     forest: bool,
     grass: bool,
     foliage: bool,
@@ -95,6 +100,9 @@ impl Default for Prefs {
             length_m: 4500.0,
             seed: 1,
             batch: 1,
+            max_uses: 1,
+            use_sequence: false,
+            sequence: String::new(),
             forest: true,
             grass: true,
             foliage: true,
@@ -133,9 +141,28 @@ fn installed_stages(acr_dir: &str) -> Vec<Installed> {
     v
 }
 
+/// Sequence text as the backend normalizes it (single spaces, no commas).
+fn norm_sequence(s: &str) -> String {
+    s.replace(',', " ").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Tag of a piece sequence: FNV-1a 32-bit of the normalized text (= backend `_seq_tag`).
+fn seq_tag(s: &str) -> String {
+    let mut h: u32 = 0x811C_9DC5;
+    for b in norm_sequence(s).bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    format!("{h:08X}")
+}
+
 /// Output folder of a build (matches the backend's naming).
-fn build_dir(out_dir: &str, stage: &str, seed: u32, length_m: f32) -> PathBuf {
-    PathBuf::from(out_dir).join(format!("{stage}_seed{seed}_{:.0}m", length_m))
+fn build_dir(p: &Prefs, seed: u32) -> PathBuf {
+    let base = PathBuf::from(&p.out_dir);
+    if p.use_sequence && !p.sequence.trim().is_empty() {
+        return base.join(format!("{}_seq{}", p.stage, seq_tag(&p.sequence)));
+    }
+    let uses = if p.max_uses > 1 { format!("_x{}", p.max_uses) } else { String::new() };
+    base.join(format!("{}_seed{seed}_{:.0}m{uses}", p.stage, p.length_m))
 }
 
 const FW_RULE: &str = "acr-stagegen: block ACR online";
@@ -200,17 +227,34 @@ fn redact(s: &str) -> String {
     out
 }
 
-/// Short code for stage + length + seed + foliage: "WalesS4HafrenSouth/4500/939252/FGL".
+/// Short code for stage + length + seed + foliage: "WalesS4HafrenSouth/4500/939252/FGL",
+/// plus "/x2" for repeats and "/0-1_7-11_7-11r_18-19" for a sequence when used.
 fn share_code(p: &Prefs) -> String {
     let fol: String = [(p.forest, 'F'), (p.grass, 'G'), (p.foliage, 'L')]
         .iter().map(|(on, c)| if *on { *c } else { '-' }).collect();
-    format!("{}/{:.0}/{}/{}", p.stage, p.length_m, p.seed, fol)
+    let mut code = format!("{}/{:.0}/{}/{}", p.stage, p.length_m, p.seed, fol);
+    if p.use_sequence && !p.sequence.trim().is_empty() {
+        code += &format!("/{}", norm_sequence(&p.sequence).replace(' ', "_"));
+    } else if p.max_uses > 1 {
+        code += &format!("/x{}", p.max_uses);
+    }
+    code
 }
 
 fn apply_share_code(p: &mut Prefs, code: &str) -> Result<(), String> {
     let parts: Vec<&str> = code.trim().split('/').collect();
-    if parts.len() != 4 {
+    if parts.len() != 4 && parts.len() != 5 {
         return Err("expected Stage/Length/Seed/Foliage, e.g. WalesS4HafrenSouth/4500/1/FGL".into());
+    }
+    p.max_uses = 1;
+    p.use_sequence = false;
+    if let Some(extra) = parts.get(4) {
+        if let Some(n) = extra.strip_prefix('x') {
+            p.max_uses = n.parse::<u32>().map_err(|_| "bad repeats")?.clamp(1, 5);
+        } else {
+            p.sequence = extra.replace('_', " ");
+            p.use_sequence = true;
+        }
     }
     if !STAGES.iter().any(|s| s.0 == parts[0]) {
         return Err(format!("unknown stage {:?}", parts[0]));
@@ -263,6 +307,8 @@ struct Preview {
     joins: Vec<f64>,
     length: f64,
     notes: usize,
+    /// its piece sequence ("0-1 7-11 2-7r 18-19"), to edit and rebuild
+    sequence: String,
 }
 
 fn load_preview(dir: &Path) -> Result<Preview, String> {
@@ -286,6 +332,18 @@ fn load_preview(dir: &Path) -> Result<Preview, String> {
         .as_array()
         .map(|a| a.iter().skip(1).filter_map(|p| p["s_start"].as_f64()).collect())
         .unwrap_or_default();
+    let sequence = v["pieces"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| {
+                    let id = p["segment"].as_str()?.rsplit('#').next()?.to_string();
+                    Some(if p["reversed"].as_bool().unwrap_or(false) { id + "r" } else { id })
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
     Ok(Preview {
         name: dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
         length: v["length_m"].as_f64().unwrap_or(*s.last().unwrap()),
@@ -293,6 +351,7 @@ fn load_preview(dir: &Path) -> Result<Preview, String> {
         pts,
         s,
         joins,
+        sequence,
     })
 }
 
@@ -340,11 +399,16 @@ impl App {
     }
 
     fn out_for(&self, seed: u32) -> PathBuf {
-        build_dir(&self.prefs.out_dir, &self.prefs.stage, seed, self.prefs.length_m)
+        build_dir(&self.prefs, seed)
+    }
+
+    fn using_sequence(&self) -> bool {
+        self.prefs.use_sequence && !self.prefs.sequence.trim().is_empty()
     }
 
     fn start(&mut self) {
-        let seeds: Vec<u32> = (0..self.prefs.batch.max(1)).map(|i| self.prefs.seed + i).collect();
+        let n = if self.using_sequence() { 1 } else { self.prefs.batch.max(1) };   // a sequence is one stage
+        let seeds: Vec<u32> = (0..n).map(|i| self.prefs.seed + i).collect();
         self.log.clear();
         self.tab = Tab::Log;
         let (_, rx) = channel();
@@ -369,6 +433,13 @@ impl App {
             "--seed".into(), seed.to_string(),
             "--out".into(), p.out_dir.clone(),
         ];
+        if p.use_sequence && !p.sequence.trim().is_empty() {
+            args.push("--sequence".into());
+            args.push(norm_sequence(&p.sequence));
+        } else if p.max_uses > 1 {
+            args.push("--max-uses".into());
+            args.push(p.max_uses.to_string());
+        }
         if !p.forest { args.push("--no-forest".into()); }
         if !p.grass { args.push("--no-grass".into()); }
         if !p.foliage { args.push("--no-foliage".into()); }
@@ -378,7 +449,7 @@ impl App {
         let paks = PathBuf::from(&p.acr_dir).join(r"acr\Content\Paks");
         args.push("--paks".into());
         args.push(paks.display().to_string());
-        let out = build_dir(&p.out_dir, &p.stage, seed, p.length_m);
+        let out = build_dir(&p, seed);
         let (tx, rx) = channel();
         job.rx = rx;
         job.progress = 0.0;
@@ -444,6 +515,23 @@ impl App {
         let path = dir.join(format!("acr-stagegen-bugreport-{stamp}.txt"));
         std::fs::write(&path, redact(&r)).map_err(|e| e.to_string())?;
         Ok(path)
+    }
+
+    /// Show the selected stage's pieces (for a sequence) in the log.
+    fn list_segments(&mut self) {
+        let p = self.prefs.clone();
+        self.log.push_str(&format!("\n=== pieces of {} ===\n", p.stage));
+        self.tab = Tab::Log;
+        let paks = PathBuf::from(&p.acr_dir).join(r"acr\Content\Paks").display().to_string();
+        match backend_cmd(&p) {
+            Ok((prog, mut full, cwd)) => {
+                full.extend(["segments".to_string(), "--level".into(), p.stage.clone(), "--paks".into(), paks]);
+                let (tx, rx) = channel();
+                self.job = Some(Job { rx, remaining: vec![], total: 1, progress: 0.5, phase: "reading pieces".into() });
+                spawn_build(prog, cwd, full, None, tx);
+            }
+            Err(e) => self.log.push_str(&format!("backend: {e}\n")),
+        }
     }
 
     /// Remove one installed generated stage (by level name) or all of them.
@@ -622,6 +710,8 @@ impl eframe::App for App {
         }
 
         let mut block_changed = false;
+        let mut want_segments = false;
+        let pv_seq = self.preview.as_ref().map(|pv| pv.sequence.clone()).filter(|s| !s.is_empty());
         egui::SidePanel::left("opts").min_width(330.0).show(ctx, |ui| {
             ui.heading("acr-stagegen");
             ui.add_space(6.0);
@@ -671,6 +761,39 @@ impl eframe::App for App {
                     ui.add(egui::DragValue::new(&mut p.batch).range(1..=50))
                         .on_hover_text("Build this many stages (seed, seed+1, ...)");
                 });
+                ui.add_enabled_ui(!p.use_sequence, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Repeats");
+                        ui.add(egui::DragValue::new(&mut p.max_uses).range(1..=5))
+                            .on_hover_text("How often a piece of road may appear. 1: each piece at most once \
+                                            (length up to ~90 % of the original); 2-3: longer stages from \
+                                            repeated pieces (each repeat costs some memory in the game)");
+                    });
+                });
+                egui::CollapsingHeader::new("Sequence (choose the pieces yourself)")
+                    .default_open(p.use_sequence)
+                    .show(ui, |ui| {
+                        ui.checkbox(&mut p.use_sequence, "Build this sequence instead of a seed")
+                            .on_hover_text("e.g. 0-1 7-11 7-11r 7-11 18-19 to practise piece 7-11 three times. \
+                                            Numbers are tile crossings (see 'List pieces'), r = backwards; \
+                                            starts with the start piece 0-N, ends with the finish piece.");
+                        ui.add(egui::TextEdit::multiline(&mut p.sequence).desired_rows(2).desired_width(300.0)
+                            .hint_text("0-1 7-11 7-11r 7-11 18-19"));
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(pv_seq.is_some(), egui::Button::new("From the shown stage"))
+                                .on_hover_text("Copy the pieces of the stage shown on the map, to tweak them")
+                                .clicked()
+                            {
+                                p.sequence = pv_seq.clone().unwrap_or_default();
+                                p.use_sequence = true;
+                            }
+                            if ui.button("List pieces").on_hover_text("Show the pieces of this stage in the Log tab")
+                                .clicked()
+                            {
+                                want_segments = true;
+                            }
+                        });
+                    });
                 ui.label("Foliage (untick to leave out for performance):");
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut p.forest, "Forest");
@@ -762,6 +885,9 @@ impl eframe::App for App {
 
         if block_changed && !busy {
             self.sync_firewall();
+        }
+        if want_segments && !busy {
+            self.list_segments();
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {

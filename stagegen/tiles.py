@@ -261,6 +261,98 @@ def _with_layer(st: TState, k: int, r: Range, cuts: list[Cut], ext: float = 0.0)
     return tuple(lt), tuple(ls)
 
 
+def parse_sequence(text: str) -> list[tuple[int, int, bool]]:
+    """'0-1 7-11 2-7r 18-19' (commas also fine) -> [(a, b, reversed)]: cut
+    indices as printed in the build report; 'r' = driven backwards."""
+    out = []
+    for tok in text.replace(",", " ").split():
+        rev = tok.endswith("r")
+        a, _, b = tok.rstrip("r").partition("-")
+        if not (a.isdigit() and b.isdigit()):
+            raise ValueError(f"sequence: {tok!r} is not like 7-11 or 2-7r")
+        out.append((int(a), int(b), rev))
+    return out
+
+
+def sequence_state(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: TileSearchConfig,
+                   seq: list[tuple[int, int, bool]]) -> tuple[TState, list[str]]:
+    """The layout for a given piece sequence (instead of the search). Hard
+    errors raise ValueError (unknown piece, wrong ends, too many uses, pieces
+    overlapping); soft limits (kink, grade, width, clearance) come back as
+    warnings."""
+    by_ab = {(r.a, r.b): r for r in ranges}
+    last = len(cuts) - 1
+    warns = []
+    if not seq:
+        raise ValueError("sequence: empty")
+    if seq[0][0] != 0 or seq[0][2]:
+        raise ValueError("sequence: must start with the start piece 0-N (forwards)")
+    if seq[-1][1] != last or seq[-1][2]:
+        raise ValueError(f"sequence: must end with the finish piece N-{last} (forwards)")
+    st = None
+    for k, (a, b, rev) in enumerate(seq):
+        r = by_ab.get((a, b))
+        if r is None:
+            raise ValueError(f"sequence: no piece {a}-{b} (pieces are {cfg.min_len:.0f}-{cfg.max_len:.0f} m "
+                             f"between tile crossings; see `segments`)")
+        if rev and (cuts[a].kind != "cross" or cuts[b].kind != "cross"):
+            raise ValueError(f"sequence: {a}-{b} contains the start or finish, it cannot be reversed")
+        if 0 < k < len(seq) - 1 and (a == 0 or b == last):
+            raise ValueError(f"sequence: {a}-{b} contains the start or finish, only allowed at the ends")
+        if st is None:
+            pts = r.seg.points(False)
+            ext = cuts[r.b]
+            pc = Piece("segment", pts, r.seg.widths(False), r.id, False, 0.0, np.zeros(3), r.seg.pacenotes(False) or [])
+            st = TState(None, pc, r, r.a, r.b, ext.p.copy(), ext.line, ext.heading, ext.grade, ext.width,
+                        ext.s, r.tiles, _coarse(pts, cfg), 0.0)
+            st.ltiles, st.lspans = _with_layer(st, 0, r, cuts)
+            continue
+        layer = _layer_for(st, r, cuts, cfg.max_uses)
+        if layer is None:
+            raise ValueError(f"sequence: piece {a}-{b} would use a tile more than {cfg.max_uses}x "
+                             f"(raise max uses)")
+        if b == last and layer != 0:
+            raise ValueError("sequence: the finish piece's tiles are already used (it must be their first use)")
+        placed = _place(r, rev, cuts, st, cfg)
+        if placed is None:
+            # _place refuses kinks over the limit: place anyway, warn
+            loose = TileSearchConfig(**{**cfg.__dict__, "max_kink_deg": 180.0})
+            placed = _place(r, rev, cuts, st, loose)
+            warns.append(f"{a}-{b}{'r' if rev else ''}: kink {abs(np.degrees(placed[3])):.0f} deg at the join "
+                         f"(limit {cfg.max_kink_deg:.0f})")
+        pts, yaw, trans, kink, g_in, ent, ext = placed
+        if abs(g_in - st.exit_grade) > cfg.max_grade_mismatch:
+            warns.append(f"{a}-{b}{'r' if rev else ''}: gradient step {abs(g_in - st.exit_grade) * 100:.0f} % at the join")
+        if abs(ent.width - st.exit_width) > cfg.max_width_mismatch:
+            warns.append(f"{a}-{b}{'r' if rev else ''}: road width step {abs(ent.width - st.exit_width):.1f} m")
+        cxy = _coarse(pts, cfg)
+        if _too_close(st, cxy, cfg):
+            warns.append(f"{a}-{b}{'r' if rev else ''}: comes within {cfg.clearance:.0f} m of an earlier piece "
+                         f"(terrain may overlap)")
+        R = rot_z(yaw)
+        h_out = ext.heading + (np.pi if rev else 0.0) + yaw
+        pc = Piece("segment", pts, r.seg.widths(rev), r.id, rev, yaw, trans, r.seg.pacenotes(rev) or [])
+        kid = TState(st, pc, r, r.b if rev else r.a, r.a if rev else r.b, R @ ext.p + trans,
+                     ext.line + yaw, h_out, -ext.grade if rev else ext.grade, ext.width, st.length + r.seg.length,
+                     st.tiles | r.tiles, cxy, 0.0, st.kinks + [float(np.degrees(kink))], layer)
+        kid.ltiles, kid.lspans = _with_layer(st, layer, r, cuts)
+        st = kid
+    return st, warns
+
+
+def segment_table(stage: SourceStage, ranges: list[Range], cuts: list[Cut]) -> dict:
+    """For the GUI: cuts and the pieces between them (source xy for a preview)."""
+    return {
+        "level": stage.name,
+        "cuts": [{"i": i, "s": round(c.s, 1), "kind": c.kind, "x": round(float(c.p[0]), 1),
+                  "y": round(float(c.p[1]), 1)} for i, c in enumerate(cuts)],
+        "pieces": [{"id": f"{r.a}-{r.b}", "a": r.a, "b": r.b, "length": round(r.seg.length, 1),
+                    "reversible": cuts[r.a].kind == "cross" and cuts[r.b].kind == "cross",
+                    "xy": [[round(float(p[0]), 1), round(float(p[1]), 1)] for p in r.seg.points(False)[::10]]}
+                   for r in ranges],
+    }
+
+
 def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: TileSearchConfig) -> TState | None:
     rnd = random.Random(cfg.seed)
     bias = {r.id: rnd.uniform(0, cfg.variety) for r in ranges}

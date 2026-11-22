@@ -47,6 +47,31 @@ BUILD_CUT = CutConfig(max_curvature=1 / 90, max_grade_change=0.05, window_m=16.0
                       min_len=200.0, max_len=700.0, anchor_ends=True)
 
 
+def _segments(a) -> int:
+    """The level's pieces between tile crossings, for --sequence."""
+    import json
+    from .build import writers as W
+    from .extract.iostore import GameFS
+    from .extract.real import DEFAULT_PAKS, load_wp_source
+    from .extract.zen import Package
+    from .tiles import TileGrid, TileSearchConfig, find_cuts, make_ranges, segment_table
+    fs = GameFS(a.paks or DEFAULT_PAKS, include_mods=False)
+    ws = load_wp_source(fs, a.level)
+    meshes, *_ = W.read_baked_raw(Package(fs.read(ws.baked)))
+    grid = TileGrid.from_baked(meshes)
+    cuts = find_cuts(ws.stage, grid, 2.0)
+    cfg = TileSearchConfig()
+    tab = segment_table(ws.stage, make_ranges(ws.stage, grid, cuts, 2.0, cfg.min_len, cfg.max_len), cuts)
+    if a.json:
+        print(json.dumps(tab))
+        return 0
+    print(f"{a.level}: cuts 0 (start) .. {len(cuts) - 1} (finish); a sequence starts with 0-N and ends with N-"
+          f"{len(cuts) - 1}; 'r' drives a piece backwards")
+    for p in tab["pieces"]:
+        print(f"  {p['id']:>7}  {p['length']:6.0f} m" + ("" if p["reversible"] else "   (start/finish, forwards only)"))
+    return 0
+
+
 def _pretty(level: str) -> str:
     """WalesS4HafrenSouth -> Hafren South"""
     import re
@@ -61,13 +86,27 @@ def _own_name(a) -> str:
     import re
     m = re.match(r"[A-Z][a-z]+(?:[A-Z][a-z]+)?S\d+(.*)$", a.level)
     short = m.group(1) if m and m.group(1) else re.sub(r"\d", "", a.level)
+    if getattr(a, "sequence", None):
+        return f"SGQ{_seq_tag(a)}{short}"
     uses = getattr(a, "max_uses", 1)
     return f"SG{a.seed}L{int(a.length)}" + (f"U{uses}" if uses > 1 else "") + short
+
+
+def _seq_tag(a) -> str:
+    """Short stable tag of a piece sequence (for names and folders): FNV-1a
+    32-bit of the normalized text, as hex (the GUI computes the same)."""
+    norm = " ".join(a.sequence.replace(",", " ").split())
+    h = 0x811C9DC5
+    for b in norm.encode():
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+    return f"{h:08X}"
 
 
 def _out_dir(a) -> str:
     if getattr(a, "override", False):
         return os.path.join(a.out, f"{a.level}_seed{a.seed}")
+    if getattr(a, "sequence", None):
+        return os.path.join(a.out, f"{a.level}_seq{_seq_tag(a)}")
     uses = getattr(a, "max_uses", 1)
     return os.path.join(a.out, f"{a.level}_seed{a.seed}_{int(a.length)}m" + (f"_x{uses}" if uses > 1 else ""))
 
@@ -94,7 +133,20 @@ def _build_wp(a, paks: str) -> int:
     print(f"{st.name}: {(len(st.points)-1)*2/1000:.2f} km, {len(grid.tiles)} tiles of {grid.cell:.0f} m, "
           f"{len(cuts)-2} usable tile crossings, {len(ranges)} candidate pieces")
     t = time.time()
-    best = tile_search(st, ranges, cuts, cfg)
+    if getattr(a, "sequence", None):
+        # a given piece sequence instead of the search (e.g. one hard piece many
+        # times for practice): as many uses as the sequence needs
+        from .tiles import parse_sequence, sequence_state
+        cfg.max_uses = 99
+        try:
+            best, warns = sequence_state(st, ranges, cuts, cfg, parse_sequence(a.sequence))
+        except ValueError as e:
+            print(f"error: {e}")
+            return 1
+        for w in warns:
+            print("warning:", w)
+    else:
+        best = tile_search(st, ranges, cuts, cfg)
     if best is None:
         src_km = (len(st.points) - 1) * 2 / 1000
         uses = max(1, getattr(a, "max_uses", 1))
@@ -105,7 +157,7 @@ def _build_wp(a, paks: str) -> int:
         print(f"no layout found: {hint}")
         return 1
     layout = build_layout(best, 2.0)
-    if abs(best.length - a.length) > cfg.length_tolerance * a.length:
+    if not getattr(a, "sequence", None) and abs(best.length - a.length) > cfg.length_tolerance * a.length:
         print(f"note: {a.length/1000:.1f} km is not achievable from {a.level}; using the closest: "
               f"{best.length/1000:.2f} km")
     order = " ".join(p.segment_id.split("#")[1] + ("r" if p.reversed else "") for p in layout.pieces)
@@ -125,7 +177,9 @@ def _build_wp(a, paks: str) -> int:
     if not getattr(a, "override", False):
         # its own level and menu entry next to the original stage
         cfg.own_level = _own_name(a)
-        cfg.display_name = f"{_pretty(a.level)} · seed {a.seed} · {layout.length / 1000:.1f} km"
+        cfg.display_name = (f"{_pretty(a.level)} · custom {_seq_tag(a)} · {layout.length / 1000:.1f} km"
+                            if getattr(a, "sequence", None) else
+                            f"{_pretty(a.level)} · seed {a.seed} · {layout.length / 1000:.1f} km")
     if getattr(a, "no_forest", False):
         cfg.forest = "hide"
     if getattr(a, "no_grass", False):
@@ -322,6 +376,13 @@ def main(argv=None):
     b.add_argument("--length", type=float, default=5500)
     b.add_argument("--max-uses", type=int, default=1,
                    help="how often a tile may appear (>1: repeated tiles for stages longer than the source)")
+    b.add_argument("--sequence", default=None, metavar="PIECES",
+                   help="build exactly these pieces instead of searching, e.g. '0-1 7-11 7-11 7-11 18-19' "
+                        "(cut indices from `segments`; 'r' = backwards); repeats allowed")
+    sg = sub.add_parser("segments", help="list a level's pieces (for --sequence); --json for tools")
+    sg.add_argument("--level", required=True)
+    sg.add_argument("--paks")
+    sg.add_argument("--json", action="store_true")
     b.add_argument("--seed", type=int, default=0)
     b.add_argument("--corridor", type=float, default=35.0)
     b.add_argument("--out", default="out")
@@ -363,6 +424,8 @@ def main(argv=None):
 
     if a.cmd == "list":
         return _list(a)
+    if a.cmd == "segments":
+        return _segments(a)
     if a.cmd == "build":
         return _build(a)
 

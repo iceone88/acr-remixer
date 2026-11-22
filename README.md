@@ -41,15 +41,27 @@ stage. Everything comes from your own game install; nothing is downloaded.
 
 ## Driving your stage
 
-The generated stage **takes the place of the stage it was made from** (for
-now). For Hafren South:
+Each generated stage is **added as an extra stage** next to the originals, under
+the rally it was made from. For one made from Hafren South:
 
-*Free Practice* → **Wales** → **Hafren South** → start the session.
+*Free Practice* → **Wales** → **Hafren South · seed 1 · 4.8 km** → start the session.
 
-You'll see the original stage name and length in the menu, but you'll drive the
-new layout, with matching pacenotes.
+You can install as many as you like; the originals stay untouched. The window
+lists the installed stages, each with its own *Uninstall* button.
 
-To get the original stage back, press **Uninstall generated stage**.
+## What you can use it for
+
+- **Fresh stages to learn:** a new seed is a new stage with new corners and
+  matching pacenotes, so you have to listen to your co-driver again instead of
+  driving from memory.
+- **Longer stages:** with *Repeats* above 1, pieces of the original stage may
+  appear more than once, so a stage can be longer than the road it was made
+  from (e.g. 8–13 km from Hafren South's 5.6 km).
+- **Practising one hard section:** with a *Sequence* you choose the pieces
+  yourself, so you can repeat one difficult piece many times in a row, e.g.
+  `0-1 7-11 7-11r 7-11 7-11r 18-19` drives piece 7-11 four times (alternating
+  directions fits best; the same direction twice usually leaves a sharp kink at
+  the join, and the window warns about it).
 
 ## The options
 
@@ -58,13 +70,15 @@ To get the original stage back, press **Uninstall generated stage**.
 | **Stage** | Which official stage to take the pieces from. |
 | **Length** | The length you'd like. Each source stage only has so much road, so the program picks the closest length that's possible. |
 | **Seed** | The "recipe" number. Same stage + length + seed = the same result, so you can share good ones with friends. |
-| **Batch** | Builds several stages in a row (seed, seed+1, …), so you can compare them on the map. Only the last one is installed. |
+| **Repeats** | How often a piece of road may appear. 1 = every piece at most once (stage length limited to about 90 % of the original); 2–3 = longer stages from repeated pieces. Each repeat costs some memory in the game. |
+| **Sequence** | Optional: the exact pieces to drive instead of letting the seed decide, e.g. `0-1 7-11 2-7r 18-19` (numbers are the tile crossings, `r` = backwards). It starts filled with the last generated stage, so you can tweak that; the list next to it shows which pieces exist. Repeats are allowed as often as you like. |
+| **Batch** | Builds several stages in a row (seed, seed+1, …), so you can compare them on the map. Each one is installed as its own stage. |
 | **Forest / Grass & rocks / Ground grass** | Trees and plants along the road. Untick some if your PC struggles; the stage then looks barer but runs faster. |
 | **Install / Start ACR** | Put the stage into the game automatically, and optionally start the game. |
 | **Block ACR online while a stage is installed** | Optional. Adds a Windows Firewall rule that cuts ACR off from the internet while a generated stage is installed, and removes it again when you uninstall, so no times from a generated stage can reach the online leaderboards. Windows asks for admin rights each time the rule changes. |
 
-While a generated stage is installed, an orange bar at the top of the window
-says so, with buttons to block ACR online or uninstall the stage.
+While generated stages are installed, a bar at the top of the window lists
+them, with buttons to block ACR online or uninstall them one by one.
 
 The **Map** tab shows the new route from above (each colour is one piece of an
 original stage), **Elevation** shows the height profile with the joins marked,
@@ -78,12 +92,12 @@ A camera tour through a generated stage, from the start (top left) to the finish
 
 ## Good to know
 
-- **It's a mod:** it adds three files to `Assetto Corsa Rally\acr\Content\Paks\~mods`.
-  *Uninstall generated stage* removes them. Your original game files are never
+- **It's a mod:** each stage adds a few files to
+  `Assetto Corsa Rally\acr\Content\Paks\~mods`, plus one shared file with the
+  menu entries. *Uninstall* removes them. Your original game files are never
   changed.
 - **Online / leaderboards:** play generated stages offline and don't submit
-  times from them. While a generated stage is installed it uses the original
-  stage's slot, so uninstall it before playing online.
+  times from them; the optional firewall block helps with that.
 - **Game updates** may break it until acr-stagegen is updated.
 - Known rough edges: the service park can look odd, small seams at the joins,
   and a few distant hills may look out of place.
@@ -105,7 +119,12 @@ python -m stagegen.cli list                     # levels in the install
 python -m stagegen.cli build --level WalesS4HafrenSouth --length 4500 --seed 1 --out out --install
 python -m stagegen.cli build ... --no-forest --no-grass --no-foliage   # leave foliage out
 python -m stagegen.cli build ... --cfg seam_width=40                    # any WPConfig option
-python -m stagegen.cli uninstall
+python -m stagegen.cli build --level WalesS4HafrenSouth --length 8000 --max-uses 2 --seed 1 --out out
+python -m stagegen.cli segments --level WalesS4HafrenSouth              # pieces for --sequence (--json)
+python -m stagegen.cli build --level WalesS4HafrenSouth --sequence "0-1 7-11 7-11r 7-11 18-19" --out out
+python -m stagegen.cli installed                                        # installed stages
+python -m stagegen.cli uninstall [--stage SG1L4500HafrenSouth]          # one or all
+python -m stagegen.cli build ... --override                             # old mode: replace the original stage
 ```
 
 Release build (what `.github/workflows/nightly.yml` does):
