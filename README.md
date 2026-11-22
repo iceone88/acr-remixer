@@ -18,6 +18,13 @@ stage. Everything comes from your own game install; nothing is downloaded.
 > Wales – Hafren South and Greece – Elatia work well. The other stages are
 > marked *experimental*: they may look broken or be undrivable for now.
 
+> **Contributions welcome!** Bug reports, ideas, good share codes and pull
+> requests are all appreciated: open an
+> [issue](../../issues) or a [pull request](../../pulls), or write to
+> **acr-remix [at] protagon [dot] space**. For bugs, *Bug report → Export bug
+> report* in the window writes one file with everything needed (your user name
+> is hidden); please attach it.
+
 ---
 
 ## Quick start
