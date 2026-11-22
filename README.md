@@ -76,9 +76,11 @@ lists the installed stages, each with its own *Uninstall* button.
   from (e.g. 8–13 km from Hafren South's 5.6 km).
 - **Practising one hard section:** with a *Sequence* you choose the pieces
   yourself, so you can repeat one difficult piece many times in a row, e.g.
-  `0-1 7-11 7-11r 7-11 7-11r 18-19` drives piece 7-11 four times (alternating
-  directions fits best; the same direction twice usually leaves a sharp kink at
-  the join, and the window warns about it).
+  `0-1 7-11 7-11 7-11 18-19` drives piece 7-11 three times, or
+  `0-1 7-11 7-11r 7-11 7-11r 18-19` four times in alternating directions.
+  Where the end of a piece doesn't line up with the start of the next, the
+  join is bent smoothly (up to 45°) and the pacenotes there are made to match;
+  sharper joins stay sharp, and the window warns about them.
 
 ![A practice sequence: piece 7-11 four times](docs/gui-sequence.png)
 
