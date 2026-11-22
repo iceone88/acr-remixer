@@ -16,7 +16,8 @@ output is a small mod container that only references game/mod assets.
   edge to edge; each tile's mesh and collision are clipped to its own road
   corridor (no terrain walls from neighbouring pieces). The result currently
   overrides the source stage (Forward + Reverse). See `stagegen/tiles.py`,
-  `stagegen/build/wp.py`.
+  `stagegen/build/wp.py`. **Tested in-game 2026-11-22: a generated 4.8 km Hafren
+  South was driven start to finish (road/terrain render, joins and finish work).**
 - Not moved yet on base-game builds: trees/grass (foliage instances), respawn
   planes, replay cameras; Cut variants are not supported.
 
