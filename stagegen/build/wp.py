@@ -1345,6 +1345,12 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                           (" ..." if len(runs) > 8 else ""))
     else:
         rep.checks.append("drivability: ground at the road surface along the whole route")
+    steps = _road_steps(out_meshes, new_cl)
+    if steps:
+        rep.checks.append("STEPS ON THE ROAD (collision jumps > 0.4 m within 1 m): " + ", ".join(
+            f"{s_:.0f} m ({lat:+.0f} m: {dz:+.1f} m)" for s_, lat, dz in steps[:8]) + (" ..." if len(steps) > 8 else ""))
+    else:
+        rep.checks.append("road surface: no steps (checked every 1 m at the centre and 2 m either side)")
     # seams: where terrain of two pieces meets at different heights (shows as
     # floating sheets, the lower side is culled from below)
     seam_pts = collections.defaultdict(list)
@@ -1547,6 +1553,66 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     rep.checks += verify_wp(base + ".utoc", ws, new_pkgs, payloads, rules,
                             {p: np_ for p, (np_, _) in out_pkgs.items() if '#' not in p} if cfg.own_level else None)
     return rep
+
+
+def _road_steps(out_meshes, new_cl, lats=(-2.0, 0.0, 2.0), max_jump=0.4, step=1.0):
+    """Steps in the collision under the road: the ground height (highest
+    triangle at most 1.5 m above the route) every `step` m along the route at
+    the given lateral offsets; jumps larger than max_jump between neighbouring
+    samples. Returns [(s m, lateral m, jump m)], one per spot (s rounded)."""
+    P = resample(new_cl, step)
+    s = np.arange(len(P)) * step
+    t = np.gradient(P[:, :2], axis=0)
+    t /= np.maximum(np.linalg.norm(t, axis=1, keepdims=True), 1e-9)
+    n = np.c_[-t[:, 1], t[:, 0]]
+    route_tree = cKDTree(P[:, :2])
+    tris = []
+    for mo in out_meshes:
+        # road and terrain only (track tiles, backdrop/filler): props such as
+        # bales or barriers by the road are meant to stand up
+        if len(mo.indices) < 3 or not re.search(rb"Track\d{4}|Terrain\d{4}", mo.soft_sub):
+            continue
+        V = np.asarray(mo.vertices, np.float64)[:, [0, 2, 1]]
+        T = V[np.asarray(mo.indices).reshape(-1, 3)]
+        c = T[:, :, :2].mean(1)
+        r = np.linalg.norm(T[:, :, :2] - c[:, None, :], axis=2).max(1)
+        d, _ = route_tree.query(c)
+        tris.append(T[d <= max(abs(x) for x in lats) + 1.0 + r])
+    if not tris:
+        return []
+    T = np.vstack(tris)
+    C = T[:, :, :2].mean(1)
+    R = float(np.linalg.norm(T[:, :, :2] - C[:, None, :], axis=2).max())
+    ctree = cKDTree(C)
+    a, b, c3 = T[:, 0], T[:, 1], T[:, 2]
+    v0, v1 = c3[:, :2] - a[:, :2], b[:, :2] - a[:, :2]
+    den = v0[:, 0] * v1[:, 1] - v1[:, 0] * v0[:, 1]
+    found = {}
+    for lat in lats:
+        Q = P[:, :2] + n * lat
+        prev = None
+        for i, cand in enumerate(ctree.query_ball_point(Q, R)):
+            cand = np.asarray(cand, int)
+            z = None
+            if len(cand):
+                ok = den[cand] != 0
+                cand = cand[ok]
+                v2 = Q[i] - a[cand, :2]
+                u = (v2[:, 0] * v1[cand, 1] - v1[cand, 0] * v2[:, 1]) / den[cand]
+                v = (v0[cand, 0] * v2[:, 1] - v2[:, 0] * v0[cand, 1]) / den[cand]
+                inside = (u >= -1e-6) & (v >= -1e-6) & (u + v <= 1 + 1e-6)
+                if inside.any():
+                    ci = cand[inside]
+                    zz = a[ci, 2] + u[inside] * (c3[ci, 2] - a[ci, 2]) + v[inside] * (b[ci, 2] - a[ci, 2])
+                    zz = zz[zz <= P[i, 2] + 1.5]
+                    if len(zz):
+                        z = float(zz.max())
+            if z is not None and prev is not None and abs(z - prev) > max_jump:
+                key = round(s[i] / 5)
+                if key not in found:
+                    found[key] = (float(s[i]), lat, z - prev)
+            prev = z
+    return sorted(found.values())
 
 
 def _drop_streaming_mips(payload: bytes, names) -> tuple[bytes, bool]:
