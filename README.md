@@ -63,6 +63,8 @@ lists the installed stages, each with its own *Uninstall* button.
   directions fits best; the same direction twice usually leaves a sharp kink at
   the join, and the window warns about it).
 
+![A practice sequence: piece 7-11 four times](docs/gui-sequence.png)
+
 ## The options
 
 | Option | What it does |
