@@ -8,6 +8,12 @@ stage. Everything comes from your own game install; nothing is downloaded.
 
 ![A generated Hafren South stage in the game](docs/ingame-forest.jpg)
 
+> **Unofficial fan project.** Not affiliated with, endorsed by or supported by
+> Kunos Simulazioni, Supernova Games Studios or the publisher of Assetto Corsa
+> Rally. "Assetto Corsa" is a trademark of its owner. acr-stagegen contains no
+> game files: stages are generated on your PC from your own copy of the game.
+> Use it offline and at your own risk; it may stop working after game updates.
+
 > **Status: early, good enough for practice.**
 > Wales – Hafren South works well. The other stages are marked
 > *experimental*: they may be undrivable or crash the game for now.
@@ -71,8 +77,9 @@ A camera tour through a generated stage, from the start (top left) to the finish
 - **It's a mod:** it adds three files to `Assetto Corsa Rally\acr\Content\Paks\~mods`.
   *Uninstall generated stage* removes them. Your original game files are never
   changed.
-- **Online / leaderboards:** use it offline. Times on a generated stage are
-  not comparable to the real one.
+- **Online / leaderboards:** play generated stages offline and don't submit
+  times from them. While a generated stage is installed it uses the original
+  stage's slot, so uninstall it before playing online.
 - **Game updates** may break it until acr-stagegen is updated.
 - Known rough edges: the service park can look odd, small seams at the joins,
   and a few distant hills may look out of place.
