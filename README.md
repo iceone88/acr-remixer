@@ -101,6 +101,12 @@ A camera tour through a generated stage, from the start (top left) to the finish
 - **Game updates** may break it until ACR Remixer is updated.
 - Known rough edges: the service park can look odd, small seams at the joins,
   and a few distant hills may look out of place.
+- **Repeated pieces** (*Repeats* above 1, or a *Sequence* that uses a piece more
+  than once): some stretches of the second and later uses have less or no
+  foliage, because part of the vegetation exists only once in the game and
+  isn't copied yet. Drivable, just barer.
+- **Very long stages** may have short stretches without background ground far
+  below the road (the build log names them under *filler coverage*).
 
 ---
 
