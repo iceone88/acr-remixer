@@ -276,6 +276,12 @@ def _occ_hit(raster, pts: np.ndarray) -> np.ndarray:
     return out
 
 
+def pkg_name_of_path_exists(fs, pkg_name: str) -> bool:
+    """Is there a package with exactly this name (e.g. an un-numbered base)?"""
+    rel = pkg_name[len("/Game/"):] if pkg_name.startswith("/Game/") else None
+    return rel is not None and any(f"acr/Content/{rel}{ext}" in fs.index for ext in (".uasset", ".umap"))
+
+
 _MESH_EXTENT: dict = {}
 
 
@@ -1242,7 +1248,40 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     if cfg.own_level:
         # the level under its own name: main + every cell (changed or not)
         # renamed, other changed packages as they are; fresh container header
-        ren = level_renamer(lvl, cfg.own_level)
+        # every other changed asset (tile meshes, backdrop, backgrounds,
+        # collision, pacenotes) gets its own copy under /Game/Stagegen/<name>/,
+        # keeping its file name (so object names and export hashes stay valid),
+        # so the original stage stays untouched
+        lvl_ren = level_renamer(lvl, cfg.own_level)
+        level_paths = set([ws.main] + ws.cells)
+
+        def pkg_name_of(path):
+            return "/Game/" + path.split("/Content/", 1)[1].rsplit(".", 1)[0]
+
+        asset_map = {pkg_name_of(p): f"/Game/Stagegen/{cfg.own_level}/" + pkg_name_of(p)[len("/Game/"):]
+                     for p in new_pkgs if p not in level_paths}
+        # names are stored as base + number ("..._Terrain" #2 = "..._Terrain_1"):
+        # map a base name too, if every numbered package with that base is copied
+        by_base = collections.defaultdict(set)
+        for p in fs.index:
+            if p.endswith((".uasset", ".umap")) and "/Content/" in p:
+                nm = pkg_name_of(p)
+                m_ = re.match(r"(.*)_(\d+)$", nm)
+                if m_:
+                    by_base[m_.group(1)].add(nm)
+        for base, variants in by_base.items():
+            if base not in asset_map and variants and all(v in asset_map for v in variants) \
+                    and pkg_name_of_path_exists(fs, base) is False:
+                asset_map[base] = f"/Game/Stagegen/{cfg.own_level}/" + base[len("/Game/"):]
+
+        def ren(n: str) -> str:
+            if n in asset_map:
+                return asset_map[n]
+            head, dot, tail = n.partition(".")
+            if dot and head in asset_map:                  # object path pkg.object
+                return asset_map[head] + "." + tail
+            return lvl_ren(n)
+
         out_pkgs = {}
         for path in [ws.main] + ws.cells:
             data = new_pkgs.get(path) or fs.read(path)
@@ -1251,7 +1290,10 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             out_pkgs[path] = (new_path, rename_package(data, ren))
         for path, data in new_pkgs.items():
             if path not in out_pkgs:
-                out_pkgs[path] = (path, data)
+                new_path = path.replace("/Content/", f"/Content/Stagegen/{cfg.own_level}/", 1)
+                out_pkgs[path] = (new_path, rename_package(data, ren))
+        rep.checks.append(f"own level: {sum(1 for p in new_pkgs if p not in level_paths)} changed assets copied to "
+                          f"/Game/Stagegen/{cfg.own_level}/")
         src_headers: dict = {}
         entries = {}
         for path, (new_path, data) in out_pkgs.items():
