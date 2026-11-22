@@ -84,6 +84,12 @@ def _build_wp(a, paks: str) -> int:
     from .build.wp import WPConfig
     cfg = WPConfig(debug_spawn_s=a.spawn_at, debug_no_clip=a.no_clip, debug_offset_zero=a.offset_zero,
                    debug_offset=None if a.offset is None else tuple(float(v) for v in a.offset.split(',')))
+    if getattr(a, "no_forest", False):
+        cfg.forest = "hide"
+    if getattr(a, "no_grass", False):
+        cfg.grass = "hide"
+    if getattr(a, "no_foliage", False):
+        cfg.foliage_tool = "hide"
     fields = {f.name for f in dataclasses.fields(WPConfig)}
     for kv in getattr(a, "cfg", []) or []:
         k, _, v = kv.partition("=")
@@ -246,6 +252,9 @@ def main(argv=None):
     b.add_argument("--no-clip", action="store_true", help="test builds: leave track meshes unclipped")
     b.add_argument("--offset-zero", action="store_true", help="test builds: build on top of the original map")
     b.add_argument("--offset", default=None, help="test builds: placement offset x,y,z in metres")
+    for kind, what in (("forest", "forest trees"), ("grass", "grass, branches and rocks"),
+                       ("foliage", "foliage-tool grass")):
+        b.add_argument(f"--no-{kind}", action="store_true", help=f"leave out the {what} (performance)")
     b.add_argument("--cfg", action="append", default=[], metavar="KEY=VALUE",
                    help="set any build option (see WPConfig), e.g. --cfg seam_width=40 --cfg filler=False")
     ins = sub.add_parser("install", help="copy a built stage container into acr/Content/Paks/~mods")

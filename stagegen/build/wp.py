@@ -68,9 +68,10 @@ class WPConfig:
     filler: bool = True                  # backdrop terrain becomes ground under the whole new stage
     filler_below: float = 1.5            # m: filler sits this far below the stage terrain
     bg_clear: float = 2000.0            # m: background (satellite map) mesh hidden this close to the new route
-    move_forest: bool = True             # PCG forest trees follow the piece owning their spot
-    move_grass: bool = True              # ... and the PCG grass/branches/rocks
-    hide_foliage: bool = True          # zero-scale the (unmoved) per-cell foliage instances
+    # foliage, each "move" (follows the piece owning its spot) or "hide" (left out, faster)
+    forest: str = "move"                 # PCG forest trees (PCGPartitionActor HISMs)
+    grass: str = "move"                  # PCG grass, branches, rocks (PCGGrassContainer)
+    foliage_tool: str = "move"           # foliage-tool grass (InstancedFoliageActor)
     hide_unused_tiles: bool = True       # tiles the layout does not use would float at the old location
     seam_width: float = 60.0            # m: terrain height blending either side of piece boundaries (0 = off)
     debug_skip_kinds: tuple = ()         # test builds: actor kinds left unmoved
@@ -121,6 +122,20 @@ class _Assign:
         for j, pc in enumerate(self.p):
             k[(k < 0) & (s >= pc.sa - e) & (s <= pc.sb + e)] = j
         return k, d, s, idx
+
+
+FOLIAGE_OWNERS = ("PCGPartitionActor", "PCGGrassContainer", "InstancedFoliageActor")
+
+
+def _foliage_mode(cfg, owner: str, name: str):
+    """'move' / 'hide' for an instanced foliage component, None for anything else."""
+    if owner.startswith("PCGPartitionActor"):
+        return cfg.forest if name.startswith(("HISM_", "ISM_")) else None
+    if owner.startswith("PCGGrassContainer"):
+        return cfg.grass
+    if owner.startswith("InstancedFoliageActor"):
+        return cfg.foliage_tool
+    return None
 
 
 def _filler_height_field(surf, pieces, tree_new, tree_new_all, seam_dz, new_cl, mesh_list, bd_re_bytes,
@@ -407,17 +422,16 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     for path, pk in pkgs.items():
         ex = pk.exports
         route = ws.route_cells.get(path)
-        if cfg.hide_foliage:
-            # per-cell grass/foliage instances are not moved: at the original
-            # location they float in the void left by the moved tiles
-            for i, e in enumerate(ex):
-                own = ex[e.outer].name if 0 <= e.outer < len(ex) else ""
-                if own.startswith("InstancedFoliageActor") or (own.startswith("PCGGrassContainer")
-                                                                and not (cfg.move_forest and cfg.move_grass)):
-                    nb, nh = hide_instances(pk.export_bytes(e))
-                    if nh:
-                        payloads[path][i] = nb
-                        rep.moved["foliage instances hidden"] += nh
+        # foliage left out ("hide"): zero-scaled; unmoved it would float at the
+        # original location in the void left by the moved tiles
+        for i, e in enumerate(ex):
+            own = ex[e.outer].name if 0 <= e.outer < len(ex) else ""
+            mode = _foliage_mode(cfg, own, e.name)
+            if mode == "hide":
+                nb, nh = hide_instances(pk.export_bytes(e))
+                if nh:
+                    payloads[path][i] = nb
+                    rep.moved["foliage instances left out"] += nh
         comps = [c for c in decode_components(pk, rules) if c.root and c.loc is not None]
         pcg_roots: dict[int, np.ndarray] = {}
         for c in comps:
@@ -455,8 +469,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                     payloads[path][c.export] = patched_payload(pk, c, loc * 100, rot)
                     rep.moved["backdrop terrain"] += 1
                 continue
-            if c.root and (owner.startswith("PCGPartitionActor")
-                           or (cfg.move_grass and owner.startswith("PCGGrassContainer"))):
+            if c.root and owner.startswith(FOLIAGE_OWNERS):
                 pcg_roots[c.owner] = c.loc.copy()
             if owner.startswith(SKIP_OWNERS) or any(w in owner for w in SKIP_WORDS):
                 continue
@@ -507,11 +520,9 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         # PCG forest (HISM trees on PCGPartitionActors, positions relative to the
         # actor root): each tree moves with the piece owning its spot, if that
         # piece's terrain is under it; the rest are hidden
-        if cfg.move_forest:
+        if True:
             for i, e in enumerate(ex):
-                if e.outer not in pcg_roots:
-                    continue
-                if ex[e.outer].name.startswith("PCGPartitionActor") and not e.name.startswith(("HISM_", "ISM_")):
+                if e.outer not in pcg_roots or _foliage_mode(cfg, ex[e.outer].name, e.name) != "move":
                     continue
                 try:
                     nb, st = move_hism(pk.export_bytes(e), pcg_roots[e.outer], place_trees)
@@ -526,7 +537,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                     if st.get("boxes", 0) == 0:
                         forest_nobox[0] += 1
 
-    if cfg.move_forest:
+    if "move" in (cfg.forest, cfg.grass, cfg.foliage_tool):
         rep.checks.append(f"forest: {rep.moved['forest trees']} trees moved, {rep.moved['forest trees hidden']} "
                           f"hidden; {forest_nobox[0]} components without cached bounds found")
 
