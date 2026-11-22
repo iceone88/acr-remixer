@@ -79,7 +79,21 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item gui/target/release/acr-remixer.exe dist/acr-remixer.exe
           $log = git log -15 --pretty=format:"- %s (%h)"
-          $notes = "Nightly build $date ($short). Unsigned; Windows SmartScreen may warn.`n`nVerified in-game: Wales - Hafren South, Greece - Elatia; other stages are experimental.`n`nRecent changes:`n$log"
+          $notes = @(
+            "**ACR Remixer** nightly build $date (``$short``): new rally stages for Assetto Corsa Rally, remixed from the stages you already own.",
+            "",
+            "Download ``acr-remixer.exe`` below and start it; nothing to install. It is unsigned, so Windows SmartScreen may warn: *More info* -> *Run anyway*.",
+            "",
+            "- Generated stages are added as extra stages in Free Practice under their rally; the originals stay untouched.",
+            "- Longer stages from repeated pieces (*Repeats*), your own piece sequences (*Sequence*), share codes.",
+            "- Verified in-game: Wales - Hafren South, Greece - Elatia. Other stages are experimental.",
+            "- Play generated stages offline. Unofficial fan project, not affiliated with Kunos Simulazioni or the publisher.",
+            "",
+            "Bugs and ideas welcome: open an issue (the window's *Bug report -> Export bug report* helps).",
+            "",
+            "**Recent changes**",
+            $log
+          ) -join "`n"
           gh release delete nightly --yes --cleanup-tag 2>$null   # none on the first run
           $global:LASTEXITCODE = 0
-          gh release create nightly dist/acr-remixer.exe --prerelease --target $env:GITHUB_SHA --title "Nightly $date" --notes "$notes"
+          gh release create nightly dist/acr-remixer.exe --prerelease --target $env:GITHUB_SHA --title "ACR Remixer nightly $date" --notes "$notes"
