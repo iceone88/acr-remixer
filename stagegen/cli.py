@@ -61,13 +61,15 @@ def _own_name(a) -> str:
     import re
     m = re.match(r"[A-Z][a-z]+(?:[A-Z][a-z]+)?S\d+(.*)$", a.level)
     short = m.group(1) if m and m.group(1) else re.sub(r"\d", "", a.level)
-    return f"SG{a.seed}L{int(a.length)}{short}"
+    uses = getattr(a, "max_uses", 1)
+    return f"SG{a.seed}L{int(a.length)}" + (f"U{uses}" if uses > 1 else "") + short
 
 
 def _out_dir(a) -> str:
     if getattr(a, "override", False):
         return os.path.join(a.out, f"{a.level}_seed{a.seed}")
-    return os.path.join(a.out, f"{a.level}_seed{a.seed}_{int(a.length)}m")
+    uses = getattr(a, "max_uses", 1)
+    return os.path.join(a.out, f"{a.level}_seed{a.seed}_{int(a.length)}m" + (f"_x{uses}" if uses > 1 else ""))
 
 
 def _build_wp(a, paks: str) -> int:
@@ -87,7 +89,7 @@ def _build_wp(a, paks: str) -> int:
     meshes, *_ = W.read_baked_raw(Package(fs.read(ws.baked)))
     grid = TileGrid.from_baked(meshes)
     cuts = find_cuts(st, grid, 2.0)
-    cfg = TileSearchConfig(target_length=a.length, seed=a.seed)
+    cfg = TileSearchConfig(target_length=a.length, seed=a.seed, max_uses=max(1, getattr(a, "max_uses", 1)))
     ranges = make_ranges(st, grid, cuts, 2.0, cfg.min_len, cfg.max_len)
     print(f"{st.name}: {(len(st.points)-1)*2/1000:.2f} km, {len(grid.tiles)} tiles of {grid.cell:.0f} m, "
           f"{len(cuts)-2} usable tile crossings, {len(ranges)} candidate pieces")
@@ -95,9 +97,11 @@ def _build_wp(a, paks: str) -> int:
     best = tile_search(st, ranges, cuts, cfg)
     if best is None:
         src_km = (len(st.points) - 1) * 2 / 1000
-        hint = (f"{a.level} has only {src_km:.1f} km of road and every section is used at most once, "
-                f"so stages are limited to about {0.9 * src_km:.1f} km; use a lower --length or a bigger level"
-                if a.length > 0.9 * src_km * 1000 else "try another --seed or a slightly different --length")
+        uses = max(1, getattr(a, "max_uses", 1))
+        hint = (f"{a.level} has only {src_km:.1f} km of road and every section is used at most {uses}x, "
+                f"so stages are limited to about {0.9 * uses * src_km:.1f} km; use a lower --length, a higher "
+                f"--max-uses or a bigger level"
+                if a.length > 0.9 * uses * src_km * 1000 else "try another --seed or a slightly different --length")
         print(f"no layout found: {hint}")
         return 1
     layout = build_layout(best, 2.0)
@@ -316,6 +320,8 @@ def main(argv=None):
     b.add_argument("--level", default="WrcgEsSS1", help="stage level to recombine and replace")
     b.add_argument("--paks")
     b.add_argument("--length", type=float, default=5500)
+    b.add_argument("--max-uses", type=int, default=1,
+                   help="how often a tile may appear (>1: repeated tiles for stages longer than the source)")
     b.add_argument("--seed", type=int, default=0)
     b.add_argument("--corridor", type=float, default=35.0)
     b.add_argument("--out", default="out")

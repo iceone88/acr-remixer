@@ -147,6 +147,8 @@ class TileSearchConfig:
     allow_reversed: bool = True
     novelty: float = 30.0          # penalty for continuing exactly like the source
     variety: float = 25.0
+    max_uses: int = 1              # how often a tile may appear (each extra use = copied cells in the build)
+    repeat_penalty: float = 60.0   # per piece and layer above 0, so repeats are used when length needs them
     seed: int = 0
     step: float = 2.0
     coarse_step: float = 10.0
@@ -169,6 +171,9 @@ class TState:
     coarse: np.ndarray
     penalty: float
     kinks: list = field(default_factory=list)
+    layer: int = 0                 # 0 = the tiles' original cells, k = their k-th copy
+    ltiles: tuple = ()             # per layer: tiles used in it
+    lspans: tuple = ()             # per layer: source (s0, s1) spans used in it
 
     def chain(self):
         s = self
@@ -229,6 +234,33 @@ def _place(rng: Range, rev: bool, cuts: list[Cut], st: TState, cfg: TileSearchCo
     return pts, yaw, trans, kink, g_in, ent, ext
 
 
+def _layer_for(st: TState, r: Range, cuts: list[Cut], max_uses: int, ext: float = 0.0) -> int | None:
+    """Lowest layer where the range shares no tile and no source stretch (the
+    build assigns actors by source position; adjacent stretches are fine, exact
+    ranges win there) with the pieces already in it; None if all max_uses
+    layers are taken."""
+    s0, s1 = cuts[r.a].s - ext, cuts[r.b].s + ext
+    for k in range(max_uses):
+        if k >= len(st.ltiles):
+            return k
+        if r.tiles & st.ltiles[k]:
+            continue
+        if any(s0 < b and a < s1 for a, b in st.lspans[k]):
+            continue
+        return k
+    return None
+
+
+def _with_layer(st: TState, k: int, r: Range, cuts: list[Cut], ext: float = 0.0):
+    lt, ls = list(st.ltiles), list(st.lspans)
+    while len(lt) <= k:
+        lt.append(frozenset())
+        ls.append(())
+    lt[k] = lt[k] | r.tiles
+    ls[k] = ls[k] + ((cuts[r.a].s - ext, cuts[r.b].s + ext),)
+    return tuple(lt), tuple(ls)
+
+
 def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: TileSearchConfig) -> TState | None:
     rnd = random.Random(cfg.seed)
     bias = {r.id: rnd.uniform(0, cfg.variety) for r in ranges}
@@ -246,17 +278,24 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
         if ext.kind == "finish":
             continue
         pc = Piece("segment", pts, r.seg.widths(False), r.id, False, 0.0, np.zeros(3), r.seg.pacenotes(False) or [])
-        beam.append(TState(None, pc, r, r.a, r.b, ext.p.copy(), ext.line, ext.heading, ext.grade, ext.width,
-                           ext.s, r.tiles, _coarse(pts, cfg), bias[r.id]))
+        st0 = TState(None, pc, r, r.a, r.b, ext.p.copy(), ext.line, ext.heading, ext.grade, ext.width,
+                     ext.s, r.tiles, _coarse(pts, cfg), bias[r.id])
+        st0.ltiles, st0.lspans = _with_layer(st0, 0, r, cuts)
+        beam.append(st0)
     finished, near = [], []
     for _ in range(60):
         nxt = []
         for st in beam:
             kids = []
             for r in ranges:
-                if r.tiles & st.tiles or r.a == 0:
+                if r.a == 0:
+                    continue
+                layer = _layer_for(st, r, cuts, cfg.max_uses)
+                if layer is None:
                     continue
                 is_fin = r.b == last
+                if is_fin and layer != 0:
+                    continue                      # finish gameplay actors exist once (route cells)
                 for rev in ((False, True) if cfg.allow_reversed and not is_fin else (False,)):
                     if rev and (cuts[r.b].kind != "cross" or cuts[r.a].kind != "cross"):
                         continue
@@ -283,13 +322,14 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
                     follows = (rev == st.piece.reversed) and (r.b if rev else r.a) == st.exit
                     pen = (st.penalty + abs(np.degrees(kink)) * 0.8
                            + 30 * abs(g_in - st.exit_grade) / cfg.max_grade_mismatch
-                           + (cfg.novelty if follows else 0) + bias[r.id])
+                           + (cfg.novelty if follows else 0) + bias[r.id] + cfg.repeat_penalty * layer)
                     h_out = ext.heading + (np.pi if rev else 0.0) + yaw
                     pc = Piece("segment", pts, r.seg.widths(rev), r.id, rev, yaw, trans,
                                r.seg.pacenotes(rev) or [])
                     kid = TState(st, pc, r, r.b if rev else r.a, r.a if rev else r.b, R @ ext.p + trans,
                                  ext.line + yaw, h_out, -ext.grade if rev else ext.grade, ext.width, L,
-                                 st.tiles | r.tiles, cxy, pen, st.kinks + [float(np.degrees(kink))])
+                                 st.tiles | r.tiles, cxy, pen, st.kinks + [float(np.degrees(kink))], layer)
+                    kid.ltiles, kid.lspans = _with_layer(st, layer, r, cuts)
                     if not is_fin:
                         kids.append(kid)
                     elif in_range:
