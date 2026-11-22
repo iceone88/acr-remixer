@@ -72,7 +72,8 @@ def _build_wp(a, paks: str) -> int:
         f.write(to_json(layout, {"seed": a.seed, "source": "game", "level": a.level}))
     plot_layout(layout, os.path.join(out, "layout.png"),
                 f"{a.level} seed {a.seed}: {layout.length/1000:.2f} km ({order})", 40)
-    rep = build_wp_stage(layout, best, cuts, grid, ws, paks, out)
+    from .build.wp import WPConfig
+    rep = build_wp_stage(layout, best, cuts, grid, ws, paks, out, WPConfig(debug_spawn_s=a.spawn_at, debug_no_clip=a.no_clip, debug_offset_zero=a.offset_zero, debug_offset=None if a.offset is None else tuple(float(v) for v in a.offset.split(',')) ))
     from .build.preview import render_collision
     fwd = next(p for p, k in ws.route_cells.items() if k == "fwd")
     render_collision(rep.out_files[0], ws.baked, fwd, os.path.join(out, "collision.png"),
@@ -195,6 +196,10 @@ def main(argv=None):
     b.add_argument("--seed", type=int, default=0)
     b.add_argument("--corridor", type=float, default=35.0)
     b.add_argument("--out", default="out")
+    b.add_argument("--spawn-at", type=float, default=None, help="test builds: spawn the car this many metres along the route")
+    b.add_argument("--no-clip", action="store_true", help="test builds: leave track meshes unclipped")
+    b.add_argument("--offset-zero", action="store_true", help="test builds: build on top of the original map")
+    b.add_argument("--offset", default=None, help="test builds: placement offset x,y,z in metres")
     ins = sub.add_parser("install", help="copy a built stage container into acr/Content/Paks/~mods")
     ins.add_argument("build_dir", help="folder written by `build`, e.g. out/WrcgEsSS1_seed0")
     ins.add_argument("--paks")

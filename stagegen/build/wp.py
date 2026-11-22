@@ -38,7 +38,8 @@ from .cityhash import name_hash
 from .iostore_write import ChunkIn, container_header_chunk_id, retarget_container_header, write_container
 from .level import decode_components, learn_rules, patched_payload
 from .mesh_clip import clip_mesh_payload, mesh_export_index
-from .wp_hash import all_cells_in_top_level, widen_cell_data
+from .wp_hash import all_cells_in_top_level, drop_cells, widen_cell_data
+from .hlod import mesh_world_bounds, transform_mesh
 from .zen_write import rewrite_package
 
 SPLINES = ("CenterSpline", "IdealSpline", "LeftBorderSpline", "RightBorderSpline", "ContourSpline")
@@ -58,6 +59,12 @@ class WPConfig:
     ctrl_spacing: float = 8.0
     loading_range_cm: float = 3.0e6
     tag: str = "Stagegen"
+    debug_spawn_s: float | None = None   # test builds: spawn the car this far along the new route
+    all_cells_loaded: bool = False       # experimental, hides HLODs (see build_wp_stage)
+    hlod_visuals: bool = False           # experiment: tile cells never load (also hides the forest)
+    debug_no_clip: bool = False          # test builds: keep tile/backdrop meshes unclipped
+    debug_offset_zero: bool = False      # test builds: build on top of the original map (piece 0 stays put)
+    debug_offset: tuple | None = None    # test builds: explicit placement offset (m)
 
 
 @dataclass
@@ -119,6 +126,10 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     old_max_x, old_min_y = max(xs) + grid.cell, min(ys)
     cl = layout.centreline
     offset = np.array([old_max_x + cfg.margin - cl[:, 0].min(), old_min_y - cl[:, 1].min(), 0.0])
+    if cfg.debug_offset_zero:
+        offset = np.zeros(3)
+    if cfg.debug_offset is not None:
+        offset = np.asarray(cfg.debug_offset, float)
     rep.offset = tuple(np.round(offset, 1))
     states = list(reversed(list(best.chain())))
     pieces = [PieceX(cuts[s.rng.a].s, cuts[s.rng.b].s, rot_z(s.piece.yaw), np.asarray(s.piece.translation) + offset,
@@ -219,6 +230,11 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 # where the car is spawned (sits behind the start line, often
                 # far from the route spline): always with the opening piece
                 loc, rot = rigid(0, p_m, c.rot)
+                if cfg.debug_spawn_s is not None:          # test builds: spawn anywhere on the route
+                    j = min(int(np.searchsorted(new_s, cfg.debug_spawn_s)), len(new_cl) - 1)
+                    loc = new_cl[j] + np.array([0, 0, 1.0])
+                    rot = np.array([0.0, np.degrees(new_head[j]), 0.0])
+                    rep.checks.append(f"DEBUG: car spawns at {cfg.debug_spawn_s:.0f} m on the new route")
                 payloads[path][c.export] = patched_payload(pk, c, loc * 100, rot)
                 rep.moved[kind] += 1
                 continue
@@ -230,6 +246,13 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 # splits are re-spaced along the new route so they stay in order
                 if kind.startswith("RaceSector") and k not in (0, len(pieces) - 1):
                     k = -1
+                if cfg.debug_spawn_s is not None and route == "fwd" and "StartTargetPoint" in kind:
+                    j = min(int(np.searchsorted(new_s, cfg.debug_spawn_s)), len(new_cl) - 1)
+                    payloads[path][c.export] = patched_payload(
+                        pk, c, (new_cl[j] + np.array([0, 0, 0.5])) * 100,
+                        np.array([0.0, np.degrees(new_head[j]), 0.0]))
+                    rep.checks.append(f"DEBUG: start target point at {cfg.debug_spawn_s:.0f} m")
+                    continue
                 if k >= 0 and d < 150:
                     loc, rot = rigid(k, p_m, c.rot)
                     rep.moved[kind] += 1
@@ -278,24 +301,55 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     if not (1000 <= cell_size <= 10_000_000 and 1000 <= rng <= 10_000_000):
         raise ValueError(f"unexpected streaming grid layout (cell {cell_size}, range {rng})")
     struct.pack_into("<f", b, 24, cfg.loading_range_cm)
-    # cells are looked up by grid coordinate, i.e. where their actors used to
-    # be: register them all in the top-level cell that holds the route cells
-    nb, hst = all_cells_in_top_level(bytes(b))
-    payloads[ws.main][hi_] = nb
-    rep.checks.append(f"streaming: all {hst['cells']} cells registered in grid level {hst['level']} "
-                      f"(was {hst['before']})")
-    # ... and make every cell's own record (position/extent/content bounds/level)
-    # cover the world, so bounds tests against the player pass too
-    widened = skipped = 0
+    payloads[ws.main][hi_] = bytes(b)
+    if cfg.hlod_visuals:
+        # track tiles do not render once moved; keep their cells unloaded so the
+        # (moved) HLOD track meshes in the main level are what is drawn
+        tile_cell_names = {p.rsplit("/", 1)[-1][:-5] for p, pk in pkgs.items()
+                           if p != ws.main and any(tile_re.match(e.name) for e in pk.exports)}
+        refs = {i + 1 for i, e in enumerate(main.exports) if e.name in tile_cell_names}
+        nb2, ndrop = drop_cells(payloads[ws.main][hi_], refs)
+        payloads[ws.main][hi_] = nb2
+        rep.checks.append(f"streaming: {ndrop} track-tile cells never load (HLOD visuals)")
+    if cfg.all_cells_loaded:
+        # experimental: register every cell in the top-level cell and widen its
+        # record. NOTE: this hides the HLODs, which are the visible track in ACR.
+        nb, hst = all_cells_in_top_level(bytes(b))
+        payloads[ws.main][hi_] = nb
+        for i, e in enumerate(main.exports):
+            if e.name.startswith("WorldPartitionRuntimeCellDataSpatialHash"):
+                nbp = widen_cell_data(main.export_bytes(e), hst["level"])
+                if nbp is not None:
+                    payloads[ws.main][i] = nbp
+        rep.checks.append(f"streaming: all {hst['cells']} cells in grid level {hst['level']}, records widened")
+
+    # ---- HLOD track meshes: the visible road/terrain in ACR. World-space
+    # meshes (one per track tile) in the main level; move + clip them in place.
+    moved_hlod = 0
     for i, e in enumerate(main.exports):
-        if e.name.startswith("WorldPartitionRuntimeCellDataSpatialHash"):
-            nbp = widen_cell_data(main.export_bytes(e), hst["level"])
-            if nbp is None:
-                skipped += 1
-            else:
-                payloads[ws.main][i] = nbp
-                widened += 1
-    rep.checks.append(f"streaming: {widened} cell records widened to world bounds ({skipped} unrecognised)")
+        if not e.name.startswith("StaticMesh_"):
+            continue
+        mb = main.export_bytes(e)
+        wb = mesh_world_bounds(mb)
+        if wb is None:
+            continue
+        lo, hi = wb
+        if np.any((hi - lo)[:2] > grid.cell * 100 * 1.2):
+            continue
+        key = tuple(grid.of(((lo + hi) / 2 / 100)[None, :2])[0])
+        if key not in tile_piece:
+            continue
+        j = tile_piece[key]
+        pc = pieces[j]
+
+        def keep(cen_cm, pc=pc):
+            d, idx = assign.tree.query(cen_cm[:, :2] / 100)
+            s = idx * step
+            return (s >= pc.sa - cfg.range_ext) & (s <= pc.sb + cfg.range_ext) & lat_ok(s, d, cfg.terrain_clip)
+        nbm, hs = transform_mesh(mb, pc.R, pc.t * 100, None if cfg.debug_no_clip else keep)
+        payloads[ws.main][i] = nbm
+        moved_hlod += 1
+    rep.moved["HLOD track mesh"] += moved_hlod
     rep.checks.append(f"streaming grid: cell {cell_size / 100:.0f} m, loading range {rng / 100:.0f} m -> "
                       f"{cfg.loading_range_cm / 100:.0f} m")
 
@@ -313,7 +367,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         return keep
 
     gen_dir = f"/{lvl}/GeneratedSplits/"
-    for key, j in sorted(tile_piece.items()):
+    for key, j in ([] if cfg.debug_no_clip else sorted(tile_piece.items())):
         if key not in tile_pivot:
             rep.checks.append(f"tile {key} has no actor"); continue
         stem = f"SM_{lvl}Track{key[0]:02d}{key[1]:02d}_"
@@ -332,7 +386,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         s = idx * step
         return unc_ext[idx] & (s >= pc.sa - 40) & (s <= pc.sb + 40) & lat_ok(s, d, cfg.terrain_clip)
 
-    if bd_piece is not None:
+    if bd_piece is not None and not cfg.debug_no_clip:
         for name, pivot in bd_pivot.items():
             p = next((x for x in fs.index if x.endswith(f"/{name}.uasset") and "/MeshesTerrain/" in x), None)
             if p is None:
@@ -452,7 +506,7 @@ def verify_wp(utoc: str, ws: WPSource, new_pkgs: dict, payloads: dict, rules) ->
         comps = {cc.export for cc in decode_components(pk, rules)}
         want = [i for i in pl if pk.exports[i].name not in SPLINES
                 and not pk.exports[i].name.startswith(("WorldPartitionRuntimeSpatialHash",
-                                                       "WorldPartitionRuntimeCellData"))]
+                                                       "WorldPartitionRuntimeCellData", "StaticMesh_"))]
         n_patched += len(want)
         bad += sum(i not in comps for i in want)
     out.append(f"level: {n_patched} patched components in {len(payloads)} packages, {bad} fail to re-decode")

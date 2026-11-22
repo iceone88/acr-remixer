@@ -373,12 +373,13 @@ def _skip_curve(r: Reader, vw: int, dbl: bool) -> tuple[list[int], bytes]:
     return h, r.d[start:r.p]
 
 
-def _hdr_for(indices: list[int]) -> bytes:
-    """Encode an unversioned header for exactly these (sorted) indices."""
+def _hdr_for(indices: list[int], zeros=()) -> bytes:
+    """Encode an unversioned header for these present indices plus the
+    zero-masked ones (explicitly zero; they carry no value bytes)."""
     frags = []
     prev = 0
     i = 0
-    idx = sorted(indices)
+    idx = sorted(set(indices) | set(zeros or ()))
     while i < len(idx):
         skip = idx[i] - prev
         while skip > 127:
@@ -391,9 +392,26 @@ def _hdr_for(indices: list[int]) -> bytes:
         i += run
     if not frags:
         frags = [[0, 0]]
+    zeros = set(zeros or ())
     out = b""
+    bits = []                                   # zero-mask bits, in value order of flagged fragments
+    pos = 0
     for k, (skip, run) in enumerate(frags):
-        out += struct.pack("<H", skip | (int(k == len(frags) - 1) << 8) | (run << 9))
+        pos += skip
+        vals = list(range(pos, pos + run))
+        pos += run
+        has_zero = any(v in zeros for v in vals)
+        if has_zero:
+            bits += [v in zeros for v in vals]
+        out += struct.pack("<H", skip | (int(has_zero) << 7) | (int(k == len(frags) - 1) << 8) | (run << 9))
+    if bits:
+        m = sum(1 << i for i, b in enumerate(bits) if b)
+        if len(bits) <= 8:
+            out += struct.pack("<B", m)
+        elif len(bits) <= 16:
+            out += struct.pack("<H", m)
+        else:
+            out += m.to_bytes(4 * ((len(bits) + 31) // 32), "little")
     return out
 
 

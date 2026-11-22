@@ -116,6 +116,18 @@ def widen_cell_data(payload: bytes, level: int, half: float = 1.0e7) -> bytes | 
     return out + tail
 
 
+def drop_cells(payload: bytes, refs_to_drop: set) -> tuple[bytes, int]:
+    """Remove cells from the streaming grid so they never load (their HLODs stay shown)."""
+    levels, a, b, _ = read_grid(payload)
+    n = 0
+    for lv in levels:
+        for cell in lv.layer_cells:
+            keep = [x for x in cell if x not in refs_to_drop]
+            n += len(cell) - len(keep)
+            cell[:] = keep
+    return payload[:a] + _write_levels(levels) + payload[b:], n
+
+
 def all_cells_in_top_level(payload: bytes) -> tuple[bytes, dict]:
     levels, a, b, _ = read_grid(payload)
     refs = []

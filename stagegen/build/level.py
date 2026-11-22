@@ -1,4 +1,4 @@
-"""Exact, per-class decoding and patching of root scene-component transforms
+﻿"""Exact, per-class decoding and patching of root scene-component transforms
 in a cooked level (UE 5.6, unversioned properties).
 
 Unversioned property indices count the most-derived class first, so the
@@ -56,6 +56,7 @@ class Comp:
     loc: np.ndarray | None
     rot: np.ndarray | None
     scale: np.ndarray | None
+    zeros: tuple = ()             # zero-masked property indices (explicitly zero, must be kept)
 
     @property
     def root(self) -> bool:
@@ -124,7 +125,7 @@ def decode_components(pk: Package, rules: dict | None = None) -> list[Comp]:
             continue
         r = Reader(d, e.data_offset)
         try:
-            h = r.header()
+            h, zeros = r.header_full()
         except Exception:     # noqa: BLE001
             continue
         L = rule.L
@@ -167,7 +168,7 @@ def decode_components(pk: Package, rules: dict | None = None) -> list[Comp]:
                 continue
             if not _sane(loc, rot, sc):
                 continue
-            out.append(Comp(i, e.outer, rule, h, r.p, block_start, block_end, loc, rot, sc))
+            out.append(Comp(i, e.outer, rule, h, r.p, block_start, block_end, loc, rot, sc, tuple(zeros)))
             break
     return out
 
@@ -185,5 +186,6 @@ def patched_payload(pk: Package, c: Comp, loc: np.ndarray, rot: np.ndarray,
     vals = [(L, loc, np.any(loc)), (L + 1, rot, np.any(rot)), (L + 2, sc, not np.allclose(sc, 1.0))]
     present = (set(c.present) - {L, L + 1, L + 2}) | {i for i, _, keep in vals if keep}
     block = b"".join(struct.pack("<3d", *v) for _, v, keep in vals if keep)
-    head = _hdr_for(sorted(present))
+    zeros = [z for z in c.zeros if z not in present and z not in (L, L + 1, L + 2)]
+    head = _hdr_for(sorted(present), zeros)
     return head + d[c.hdr_end: c.block_start] + block + d[c.block_end: e.data_offset + e.serial_size]

@@ -48,6 +48,26 @@ class Reader:
         s = names[i] if i < len(names) else f"<{i}>"
         return s if num == 0 else f"{s}_{num - 1}"
 
+    def header_full(self) -> tuple[list[int], list[int]]:
+        """(present indices, zero-masked indices). Zero-masked properties are
+        explicitly zero/false/empty: NOT the same as absent (class default)."""
+        start = self.p
+        frags = []
+        while True:
+            f = self.u16()
+            frags.append(f)
+            if (f >> 8) & 1:
+                break
+        self.p = start
+        present = self.header()
+        idx, listed = 0, []
+        for f in frags:
+            idx += f & 0x7F
+            n = f >> 9
+            listed.extend(range(idx, idx + n))
+            idx += n
+        return present, [i for i in listed if i not in present]
+
     def header(self) -> list[int]:
         """Return the schema indices of the values that follow (zero-masked
         ones removed)."""
