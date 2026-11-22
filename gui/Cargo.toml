@@ -1,0 +1,22 @@
+[package]
+name = "acr-stagegen-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Procedural stage generator for Assetto Corsa Rally (GUI)"
+
+[[bin]]
+name = "acr-stagegen"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui_plot = "0.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+winreg = "0.55"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

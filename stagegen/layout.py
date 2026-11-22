@@ -71,4 +71,7 @@ def to_json(layout: Layout, meta: dict) -> str:
             "centreline": [[round(float(v), 2) for v in q] for q in p.points[::5]] if p.kind == "connector" else None,
         } for p, (a, b) in zip(layout.pieces, layout.piece_ranges)],
         "pacenotes": [{"s": round(n.s, 1), "call": n.text, "origin": n.origin} for n in layout.pacenotes],
+        # whole route, every ~10 m (x, y, z in m; layout frame): for previews
+        "preview": [[round(float(v), 1) for v in q] for q in layout.centreline[::max(1, int(round(
+            10.0 / max(1e-6, layout.length / max(1, len(layout.centreline) - 1)))))]],
     }, indent=1)
