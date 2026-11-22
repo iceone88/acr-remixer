@@ -81,7 +81,8 @@ def main():
     s = None
     for attempt in range(2):                             # the game occasionally dies during the intro
         try:
-            s = wait_ui(title, 240, "title screen")
+            # the title can be skipped (a key press, or the game goes straight on): the main menu counts too
+            s = wait_ui(lambda s: title(s) or "WB_MainMenu_C" in s, 240, "title screen")
             break
         except SystemExit:
             alive = "acr.exe" in subprocess.run(["tasklist", "/FI", "IMAGENAME eq acr.exe"], capture_output=True,

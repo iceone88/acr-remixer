@@ -68,7 +68,8 @@ class WPConfig:
     hlod_hide: bool = True               # empty all HLOD proxy meshes (cells are always loaded)
     filler: bool = True                  # backdrop terrain becomes ground under the whole new stage
     filler_below: float = 1.5            # m: filler sits this far below the stage terrain
-    bg_clear: float = 2000.0            # m: background (satellite map) mesh hidden this close to the new route
+    giant_mesh_m: float = 400.0          # m: meshes wider than this are scenery, never moved as props
+    bg_clear: float = 2000.0           # m: background (satellite map) mesh hidden this close to the new route
     # foliage, each "move" (follows the piece owning its spot) or "hide" (left out, faster)
     forest: str = "move"                 # PCG forest trees (PCGPartitionActor HISMs)
     grass: str = "move"                  # PCG grass, branches, rocks (PCGGrassContainer)
@@ -234,6 +235,74 @@ def _component_transforms_for_mesh(pk: Package, mesh_pkg_path: str) -> list:
     return out
 
 
+_MESH_EXTENT: dict = {}
+
+
+_MESH_VERTS: dict = {}
+
+
+def _mesh_lod0_m(fs, mesh_path: str):
+    """LOD0 vertex positions (m, mesh-local) of a mesh package, cached."""
+    if mesh_path not in _MESH_VERTS:
+        P = None
+        ap = "acr/Content/" + mesh_path[len("/Game/"):] + ".uasset"
+        if ap in fs.index:
+            try:
+                mp = Package(fs.read(ap))
+                b = mp.export_bytes(mp.exports[mesh_export_index(mp)])
+                l0 = find_lods(b)[0]
+                P = np.frombuffer(b, "<f4", 3 * l0.n, l0.pos_off).reshape(-1, 3).astype(np.float64) / 100
+            except Exception:
+                P = None
+        _MESH_VERTS[mesh_path] = P
+    return _MESH_VERTS[mesh_path]
+
+
+def _giant_mesh_components(fs, pk: Package, limit_m: float) -> dict:
+    """{export: mesh path} of pk's static mesh components drawing a mesh wider
+    than limit_m (landscape pieces: service park terrain, mountains, towns).
+    They are scenery unless the route runs over them (see build_wp_stage)."""
+    from ..extract.unversioned import Reader
+    from ..extract.zen import read_name_batch
+    names, _ = read_name_batch(pk.d, pk.imported_pkg_names_off)
+    giant_k = set()
+    for k, n in enumerate(names):
+        leaf = n.rsplit("/", 1)[-1]
+        if not leaf.startswith("SM_"):
+            continue
+        if n not in _MESH_EXTENT:
+            ext = 0.0
+            ap = "acr/Content/" + n[len("/Game/"):] + ".uasset"
+            if ap in fs.index:
+                try:
+                    mp = Package(fs.read(ap))
+                    wb = mesh_world_bounds(mp.export_bytes(mp.exports[mesh_export_index(mp)]))
+                    if wb is not None:
+                        ext = float(((wb[1] - wb[0]) / 100)[:2].max())
+                except Exception:
+                    pass
+            _MESH_EXTENT[n] = ext
+        if _MESH_EXTENT[n] > limit_m:
+            giant_k.add(k)
+    if not giant_k:
+        return {}
+    ref_name = {-(i + 1): names[(v >> 32) & 0x3FFFFFFF] for i, v in enumerate(pk.imports)
+                if (v >> 62) == 2 and ((v >> 32) & 0x3FFFFFFF) in giant_k}
+    out = {}
+    for i, e in enumerate(pk.exports):
+        r = Reader(pk.d, e.data_offset)
+        try:
+            pres, _ = r.header_full()
+        except Exception:
+            continue
+        q = r.p - e.data_offset
+        if pres and pres[0] == 4 and q + 4 <= e.serial_size:
+            ref = struct.unpack_from("<i", pk.d, e.data_offset + q)[0]
+            if ref in ref_name:
+                out[i] = ref_name[ref]
+    return out
+
+
 def _background_meshes(fs, main: Package) -> list[str]:
     """Background mesh packages placed by the main level: imported static meshes
     with BG in the name (SM_S4HafrensSouthBG2, SM_ElatiaExtraBG04, SM_BGSet7_new)."""
@@ -243,7 +312,7 @@ def _background_meshes(fs, main: Package) -> list[str]:
     out = []
     for n in names:
         leaf = n.rsplit("/", 1)[-1]
-        if n.startswith("/Game/Environments/") and _re.match(r"SM_.*BG", leaf):
+        if n.startswith("/Game/Environments/") and _re.match(r"SM_.*BG", leaf, _re.I):     # BG, Bg
             p = "acr/Content/" + n[len("/Game/"):] + ".uasset"
             if p in fs.index:
                 out.append(p)
@@ -402,20 +471,69 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     pkgs = {p: Package(fs.read(p)) for p in pk_paths}
     rules = learn_rules(pkgs.values())
     tile_re = re.compile(rf"SM_{lvl}Track(\d\d)(\d\d)_GEN")
-    # filler ground: the coarse backdrop terrain tiles are re-centred on the new
-    # stage and reshaped (below) to its height field, so there is ground between
-    # stretches of the route (without it, distant stretches float over the void)
-    bd_pivots0 = [c.loc / 100 for c in decode_components(pkgs[ws.main], rules)
-                  if c.root and c.loc is not None and c.owner < len(pkgs[ws.main].exports)
-                  and bd_re.match(pkgs[ws.main].exports[c.owner].name)]
-    filler_shift = np.zeros(2)
-    if cfg.filler and bd_pivots0:
-        filler_shift = (new_cl[:, :2].min(0) + new_cl[:, :2].max(0)) / 2 - np.mean(bd_pivots0, axis=0)[:2]
-        if bd_piece is None:
-            rep.checks.append(f"filler ground: {len(bd_pivots0)} backdrop tiles re-centred on the new stage")
+    # filler ground: the coarse backdrop terrain tiles become ground under the
+    # whole new stage (reshaped below to its height field). Tiles that carry a
+    # route stretch without track tiles (start/finish areas, roads attached to
+    # the backdrop) stay rigid with that piece; every other tile is laid out
+    # afresh in a grid under the new route (nearest cells first); spare tiles
+    # are hidden. Without full coverage, clipped stage terrain floats in the air.
+    # footprints from the visual meshes (most backdrop tiles have no collision):
+    # LOD0 vertices + the tile actor's location, in source metres
+    tile_src: dict = {}
+    main_pk = pkgs[ws.main]
+    for c in decode_components(main_pk, rules):
+        own = main_pk.exports[c.owner].name if c.owner < len(main_pk.exports) else ""
+        if not (c.root and c.loc is not None and bd_re.match(own)):
+            continue
+        mp = next((x for x in fs.index if x.endswith(f"/{own}.uasset") and "/MeshesTerrain/" in x), None)
+        if mp is None:
+            continue
+        mpk_ = Package(fs.read(mp))
+        mb_ = mpk_.export_bytes(mpk_.exports[mesh_export_index(mpk_)])
+        lods_ = find_lods(mb_)
+        if not lods_:
+            continue
+        P_ = np.frombuffer(mb_, "<f4", 3 * lods_[0].n, lods_[0].pos_off).reshape(-1, 3).astype(np.float64)
+        tile_src[own] = (P_ + c.loc) / 100
+    filler_plan: dict = {}              # name -> None (rigid with bd_piece) | shift (2,) | "hide"
+    if cfg.filler and tile_src:
+        rigid_keep = set()
+        if bd_piece is not None and uncovered.any():
+            ut = cKDTree(src.points[uncovered][:, :2])
+            rigid_keep = {n for n, U in tile_src.items() if (ut.query(U[:, :2])[0] < 80.0).any()}
+        # full-size tiles only: the map's edge tiles are narrow strips
+        ext = {n: np.ptp(U[:, :2], axis=0) for n, U in tile_src.items()}
+        size = float(max(e.max() for e in ext.values()))
+        full = {n for n, e in ext.items() if e.min() > 0.8 * size}
+        lo = new_cl[:, :2].min(0) - 0.5 * size
+        hi = new_cl[:, :2].max(0) + 0.5 * size
+        C = np.array([(x, y) for x in np.arange(lo[0], hi[0] + size, 0.95 * size)
+                      for y in np.arange(lo[1], hi[1] + size, 0.95 * size)])
+        dC, _ = cKDTree(new_cl[:, :2]).query(C)
+        free_c = np.ones(len(C), bool)
+        if rigid_keep:
+            pc0 = pieces[bd_piece]
+            cov = np.vstack([tile_src[n] @ pc0.R.T + pc0.t for n in rigid_keep])
+            free_c = cKDTree(cov[:, :2]).query(C)[0] > 0.35 * size
+        cells = [C[i] for i in np.argsort(dC) if free_c[i] and dC[i] < 1.2 * size]
+        free_t = sorted(n for n in tile_src if n not in rigid_keep and n in full)
+        for n in tile_src:
+            if n not in rigid_keep and n not in full:
+                filler_plan[n] = "hide"
+        for n in rigid_keep:
+            filler_plan[n] = None
+        for n, cell in zip(free_t, cells):
+            U = tile_src[n]
+            filler_plan[n] = cell - (U[:, :2].min(0) + U[:, :2].max(0)) / 2
+        for n in free_t[len(cells):]:
+            filler_plan[n] = "hide"
+        rep.checks.append(f"filler ground: {len(tile_src)} backdrop tiles of ~{size:.0f} m: {len(rigid_keep)} stay with "
+                          f"piece {bd_piece}, {min(len(free_t), len(cells))} laid out under the route, "
+                          f"{max(0, len(free_t) - len(cells))} spare (hidden); {len(cells)} cells needed")
     elif cfg.filler:
         cfg.filler = False
-        rep.checks.append("filler ground: no backdrop tiles in the main level, off")
+        rep.checks.append("filler ground: no backdrop tiles, off")
+
     payloads: dict[str, dict[int, bytes]] = collections.defaultdict(dict)
     tile_pivot: dict[tuple, np.ndarray] = {}
 
@@ -457,7 +575,24 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                     rep.moved["foliage instances left out"] += nh
         comps = [c for c in decode_components(pk, rules) if c.root and c.loc is not None]
         pcg_roots: dict[int, np.ndarray] = {}
+        giant = _giant_mesh_components(fs, pk, cfg.giant_mesh_m)
         for c in comps:
+            own_ = ex[c.owner].name if c.owner < len(ex) else ""
+            if c.export in giant and not (bd_re.match(own_) or tile_re.match(own_)):   # tiles: own handling
+                # scenery stays, unless the route runs over it (e.g. the ground
+                # of a start/finish area): then it moves like any prop
+                P_ = _mesh_lod0_m(fs, giant[c.export])
+                carries = False
+                if P_ is not None:
+                    S_ = c.scale if getattr(c, "scale", None) is not None else np.ones(3)
+                    Wg = P_ * S_ + c.loc / 100           # rotation of such meshes is ~0
+                    dg, ig = cKDTree(Wg[:, :2]).query(src.points[:, :2], distance_upper_bound=15.0)
+                    ok_ = np.isfinite(dg)
+                    carries = bool(ok_.any() and (np.abs(Wg[ig[ok_], 2] - src.points[ok_, 2]) < 3.0).sum() >= 5)
+                if not carries:
+                    rep.moved["giant scenery mesh left in place"] += 1
+                    continue
+                rep.checks.append(f"giant mesh {giant[c.export].rsplit('/', 1)[-1]} carries the route: moved")
             owner = ex[c.owner].name if c.owner < len(ex) else ""
             p_m = c.loc / 100
             if c.rule.L == 26:                     # runtime virtual texture volume
@@ -482,11 +617,14 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 continue
             if bd_re.match(owner):
                 bd_pivot[owner] = c.loc.copy()
-                if cfg.filler and bd_piece is None:
-                    loc = p_m + np.r_[filler_shift, 0.0]
+                plan = filler_plan.get(owner) if cfg.filler else None
+                if isinstance(plan, np.ndarray):
+                    loc = p_m + np.r_[plan, 0.0]
                     payloads[path][c.export] = patched_payload(pk, c, loc * 100,
                                                                c.rot if c.rot is not None else np.zeros(3))
                     rep.moved["filler ground"] += 1
+                elif isinstance(plan, str):
+                    pass                                   # spare tile: its mesh is hidden below
                 elif bd_piece is not None:
                     loc, rot = rigid(bd_piece, p_m, c.rot)
                     payloads[path][c.export] = patched_payload(pk, c, loc * 100, rot)
@@ -785,6 +923,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
 
     filler_h = None
     filler_vis = []
+    filler_tris = []
     if cfg.filler:
         filler_h = _filler_height_field(
             surf, pieces, tree_new, tree_new_all, seam_dz, new_cl,
@@ -798,27 +937,39 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 rep.checks.append(f"backdrop mesh for {name} not found"); continue
             mpk = Package(fs.read(p))
             mi = mesh_export_index(mpk)
-            def to_h(P, pv=pivot):
-                # world = R (P + pivot) + t (rigid with bd_piece; z unaffected by the yaw),
-                # or the plain shift when no piece carries the backdrop
+            plan = filler_plan.get(name)
+            if isinstance(plan, str):                     # spare tile
+                nb, _ = clip_mesh_payload(mpk.export_bytes(mpk.exports[mi]), lambda c: np.zeros(len(c), bool))
+                new_pkgs[p] = rewrite_package(mpk, {mi: nb})
+                continue
+
+            def to_h(P, pv=pivot, plan=plan):
+                # laid-out tile: world = P + pivot + shift; rigid tile: world = R (P + pivot) + t
                 src = (P + pv) / 100
+                if isinstance(plan, np.ndarray):
+                    return filler_h(src[:, :2] + plan) * 100 - pv[2] - P[:, 2]
                 if bd_piece is not None:
                     pc0 = pieces[bd_piece]
                     xy = (src @ pc0.R.T + pc0.t)[:, :2]
                     dz = (filler_h(xy) - pc0.t[2]) * 100 - pv[2] - P[:, 2]
                     return (1.0 - bd_weight(src)) * dz          # start/finish areas keep their ground
-                return filler_h(src[:, :2] + filler_shift) * 100 - pv[2] - P[:, 2]
+                return np.zeros(len(P))
             nb, mx = displace_payload(mpk.export_bytes(mpk.exports[mi]), to_h)
             new_pkgs[p] = rewrite_package(mpk, {mi: nb})
             # visual check: final filler vertices (LOD0) in world space
             lod0 = find_lods(nb)[0]
             Pn = np.frombuffer(nb, "<f4", 3 * lod0.n, lod0.pos_off).reshape(-1, 3).astype(np.float64)
             srcn = (Pn + pivot) / 100
-            if bd_piece is not None:
-                Wn = srcn @ pieces[bd_piece].R.T + pieces[bd_piece].t
+            if isinstance(plan, np.ndarray):
+                Wn = srcn.copy(); Wn[:, :2] += plan
             else:
-                Wn = srcn.copy(); Wn[:, :2] += filler_shift
+                Wn = srcn @ pieces[bd_piece].R.T + pieces[bd_piece].t
             filler_vis.append(Wn)
+            for off_, cnt_, w_ in lod0.index_bufs:             # every section's triangles
+                tri_ = np.frombuffer(nb, "<u4" if w_ == 4 else "<u2", cnt_ // w_, off_).reshape(-1, 3)
+                tri_ = tri_[(tri_[:, 0] != tri_[:, 1]) | (tri_[:, 1] != tri_[:, 2])]     # skip hidden ones
+                if len(tri_):
+                    filler_tris.append(Wn[tri_][:, :, :2])
         rep.checks.append(f"filler ground: {len(bd_pivot)} tiles reshaped to the stage height field "
                           f"({cfg.filler_below:.1f} m below the stage terrain)")
     if filler_vis:
@@ -840,6 +991,34 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 f"{r0:.0f}-{r1:.0f} m (+{h:.0f} m)" for r0, r1, h in runs[:8]))
         else:
             rep.checks.append("filler ground: below the road everywhere")
+        # coverage: the filler must reach under the whole stage, or the stage's
+        # clipped terrain edges hang in the air (seen from below: floating strips)
+        # (inside a filler triangle; the backdrop meshes are coarse, so vertex
+        # distance says little)
+        far = np.ones(len(rp), bool)
+        if filler_tris:
+            T = np.vstack(filler_tris)
+            cen = T.mean(1)
+            rad = np.linalg.norm(T - cen[:, None, :], axis=2).max()
+            ctree = cKDTree(cen)
+            for k_r, p_r in enumerate(rp[:, :2]):
+                for ti in ctree.query_ball_point(p_r, rad):
+                    a, b_, c_ = T[ti]
+                    v0, v1, v2 = c_ - a, b_ - a, p_r - a
+                    den = v0[0] * v1[1] - v1[0] * v0[1]
+                    if den == 0:
+                        continue
+                    u = (v2[0] * v1[1] - v1[0] * v2[1]) / den
+                    v = (v0[0] * v2[1] - v2[0] * v0[1]) / den
+                    if u >= -1e-6 and v >= -1e-6 and u + v <= 1 + 1e-6:
+                        far[k_r] = False
+                        break
+        if far.any():
+            idx = np.flatnonzero(far)
+            rep.checks.append(f"FILLER COVERAGE: {far.mean():.0%} of the route has no filler ground under it "
+                              f"(between {idx[0] * 10:.0f} and {idx[-1] * 10:.0f} m)")
+        else:
+            rep.checks.append("filler coverage: under the whole route")
     if cfg.filler:
         pass
     elif bd_piece is not None and not cfg.debug_no_clip:
@@ -879,12 +1058,17 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
             k = np.where(keep, j, -1)
         elif re.search(rb"Terrain\d{4}", m.soft_sub):
             if filler_h is not None:
+                mt_ = re.search(rb"Terrain(\d{4})", m.soft_sub)
+                plan = filler_plan.get(f"SM_{lvl}Terrain{mt_.group(1).decode()}")
+                if isinstance(plan, str):
+                    continue                              # spare tile: no collision
                 V = U.astype(np.float64).copy()
-                w_bd = bd_weight(V)
-                if bd_piece is not None:
-                    V = V @ pieces[bd_piece].R.T + pieces[bd_piece].t
+                if isinstance(plan, np.ndarray):
+                    V[:, :2] += plan
+                    w_bd = np.zeros(len(V))
                 else:
-                    V[:, :2] += filler_shift
+                    w_bd = bd_weight(V)
+                    V = V @ pieces[bd_piece].R.T + pieces[bd_piece].t
                 V[:, 2] = w_bd * V[:, 2] + (1.0 - w_bd) * filler_h(V[:, :2])
                 out_meshes.append(W.MeshOut(V[:, [0, 2, 1]], m.indices.astype(np.uint32), m.material_ref, m.soft_pkg,
                                             m.soft_asset, m.soft_sub, m.extra, m.group))
