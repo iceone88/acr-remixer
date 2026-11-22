@@ -72,3 +72,11 @@ class Package:
 
     def export_bytes(self, e: Export) -> bytes:
         return self.d[e.data_offset: e.data_offset + e.serial_size]
+
+    def imported_package_names(self) -> list[str]:
+        """Full names of the imported packages (name batch + u32 number per
+        name; number k > 0 means the suffix _{k-1}). Their package ids, in
+        this order, are the package's imports in the container header."""
+        names, p = read_name_batch(self.d, self.imported_pkg_names_off)
+        nums = struct.unpack_from(f"<{len(names)}I", self.d, p)
+        return [n if k == 0 else f"{n}_{k - 1}" for n, k in zip(names, nums)]
