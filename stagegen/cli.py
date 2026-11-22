@@ -92,7 +92,29 @@ def _build_wp(a, paks: str) -> int:
     return 0
 
 
+def _stop_game() -> None:
+    """ACR keeps the mod container open; close it before overwriting."""
+    import subprocess
+    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq acr.exe"], capture_output=True, text=True).stdout
+    if "acr.exe" in out.lower():
+        print("closing ACR (it holds the installed container open)")
+        subprocess.run(["taskkill", "/F", "/IM", "acr.exe"], capture_output=True)
+        time.sleep(3)
+
+
 def _build(a) -> int:
+    rc = _build_impl(a)
+    if rc == 0 and (a.install or a.launch):
+        _stop_game()
+        a.build_dir = os.path.join(a.out, f"{a.level}_seed{a.seed}")
+        rc = _install(a)
+        if rc == 0 and a.launch:
+            os.startfile("steam://rungameid/3917090")
+            print("launched ACR")
+    return rc
+
+
+def _build_impl(a) -> int:
     from .build.stage import build_stage
     from .extract.iostore import GameFS
     from .extract.real import DEFAULT_PAKS, load_location
@@ -197,6 +219,8 @@ def main(argv=None):
     b.add_argument("--corridor", type=float, default=35.0)
     b.add_argument("--out", default="out")
     b.add_argument("--spawn-at", type=float, default=None, help="test builds: spawn the car this many metres along the route")
+    b.add_argument("--install", action="store_true", help="install into ~mods after building (closes ACR if running)")
+    b.add_argument("--launch", action="store_true", help="install and start ACR through Steam")
     b.add_argument("--no-clip", action="store_true", help="test builds: leave track meshes unclipped")
     b.add_argument("--offset-zero", action="store_true", help="test builds: build on top of the original map")
     b.add_argument("--offset", default=None, help="test builds: placement offset x,y,z in metres")
