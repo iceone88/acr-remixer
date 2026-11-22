@@ -1,12 +1,16 @@
-# Nightly release: one standalone acr-remixer.exe (Rust/egui GUI with the
-# frozen Python backend and the open-source Oodle shim embedded), published as
-# the "nightly" pre-release. Runs every night if main changed, or by hand.
+# Builds one standalone acr-remixer.exe (Rust/egui GUI with the frozen Python
+# backend and the open-source Oodle shim embedded) and publishes it:
+#  - every night if main changed (or by hand): as the "nightly" pre-release
+#  - for a pushed version tag (git tag v0.1.0 && git push origin v0.1.0): as
+#    release "ACR Remixer v0.1.0"; the GUI's Cargo version should match the tag
 name: nightly
 
 on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
+  push:
+    tags: ["v*"]
 
 permissions:
   contents: write
@@ -68,8 +72,38 @@ jobs:
         if: steps.changed.outputs.build == 'true'
         run: cargo build --release --manifest-path gui/Cargo.toml
 
+      - name: Check the tag against the GUI version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path gui/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne $env:GITHUB_REF_NAME) { throw "tag $env:GITHUB_REF_NAME does not match gui/Cargo.toml version $v" }
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item gui/target/release/acr-remixer.exe dist/acr-remixer.exe
+          $notes = @(
+            "**ACR Remixer $tag**: new rally stages for Assetto Corsa Rally, remixed from the stages you already own.",
+            "",
+            "Download ``acr-remixer.exe`` below and start it; nothing to install. It is unsigned, so Windows SmartScreen may warn: *More info* -> *Run anyway*. See the README for how to use it and the known limitations.",
+            "",
+            "- Generated stages are added as extra stages in Free Practice under their rally; the originals stay untouched.",
+            "- Longer stages from repeated pieces (*Repeats*), your own piece sequences (*Sequence*, e.g. to practise one hard section), share codes.",
+            "- Verified in-game: Wales - Hafren South, Greece - Elatia. Other stages are experimental.",
+            "- Play generated stages offline. Unofficial fan project, not affiliated with Kunos Simulazioni or the publisher.",
+            "",
+            "Bugs and ideas welcome: open an issue (the window's *Bug report -> Export bug report* helps)."
+          ) -join "`n"
+          gh release create $tag dist/acr-remixer.exe --verify-tag --title "ACR Remixer $tag" --notes "$notes" --generate-notes
+
       - name: Publish the nightly pre-release
-        if: steps.changed.outputs.build == 'true'
+        if: steps.changed.outputs.build == 'true' && github.ref_type != 'tag'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
