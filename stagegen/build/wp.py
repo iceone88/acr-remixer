@@ -35,7 +35,9 @@ from ..pacenotes import generate
 from ..tiles import Cut, TileGrid, TState
 from . import writers as W
 from .cityhash import name_hash
+from . import container_header as CH
 from .iostore_write import ChunkIn, container_header_chunk_id, retarget_container_header, write_container
+from .rename import level_renamer, rename_package
 from .level import decode_components, learn_rules, patched_payload
 from .mesh_clip import clip_mesh_payload, displace_payload, find_lods, mesh_export_index
 from .wp_hash import all_cells_in_top_level, drop_cells, widen_cell_data
@@ -68,7 +70,8 @@ class WPConfig:
     hlod_hide: bool = True               # empty all HLOD proxy meshes (cells are always loaded)
     filler: bool = True                  # backdrop terrain becomes ground under the whole new stage
     filler_below: float = 1.5            # m: filler sits this far below the stage terrain
-    giant_mesh_m: float = 400.0          # m: meshes wider than this are scenery, never moved as props
+    own_level: str | None = None          # write the level under this name (/Game/Levels/<name>), not over the original
+    giant_mesh_m: float = 400.0         # m: meshes wider than this are scenery, never moved as props
     bg_clear: float = 2000.0           # m: background (satellite map) mesh hidden this close to the new route
     # foliage, each "move" (follows the piece owning its spot) or "hide" (left out, faster)
     forest: str = "move"                 # PCG forest trees (PCGPartitionActor HISMs)
@@ -1236,11 +1239,42 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     cid = name_hash(pak_name)
     hdr_idx = next(i for i, x in enumerate(lvl_container.chunk_ids) if x[11] == 6)
     chunks = []
-    for path, data in new_pkgs.items():
-        c, i = fs.index[path]
-        chunks.append(ChunkIn(c.chunk_ids[i], data, path))
-    chunks.append(ChunkIn(container_header_chunk_id(cid),
-                          retarget_container_header(lvl_container.read_entry(hdr_idx), cid)))
+    if cfg.own_level:
+        # the level under its own name: main + every cell (changed or not)
+        # renamed, other changed packages as they are; fresh container header
+        ren = level_renamer(lvl, cfg.own_level)
+        out_pkgs = {}
+        for path in [ws.main] + ws.cells:
+            data = new_pkgs.get(path) or fs.read(path)
+            new_path = path.replace(f"/Levels/{lvl}.umap", f"/Levels/{cfg.own_level}.umap") \
+                           .replace(f"/Levels/{lvl}/", f"/Levels/{cfg.own_level}/")
+            out_pkgs[path] = (new_path, rename_package(data, ren))
+        for path, data in new_pkgs.items():
+            if path not in out_pkgs:
+                out_pkgs[path] = (path, data)
+        src_headers: dict = {}
+        entries = {}
+        for path, (new_path, data) in out_pkgs.items():
+            c, i = fs.index[path]
+            if id(c) not in src_headers:
+                h_i = next(k for k, x in enumerate(c.chunk_ids) if x[11] == 6)
+                src_headers[id(c)] = CH.parse(c.read_entry(h_i))
+            old_id = struct.unpack_from("<Q", c.chunk_ids[i], 0)[0]
+            pkg_name = "/Game/" + new_path.split("/Content/", 1)[1].rsplit(".", 1)[0]
+            pid = CH.package_id(pkg_name)
+            orig = src_headers[id(c)].entries.get(old_id, CH.StoreEntry())
+            entries[pid] = CH.StoreEntry([CH.package_id(n) for n in Package(data).imported_package_names()],
+                                         orig.shader_maps)
+            chunks.append(ChunkIn(struct.pack("<Q", pid) + c.chunk_ids[i][8:], data, new_path))
+        chunks.append(ChunkIn(container_header_chunk_id(cid), CH.build(CH.ContainerHeader(cid, entries))))
+        rep.checks.append(f"own level: /Game/Levels/{cfg.own_level} ({len(ws.cells)} cells renamed with it); "
+                          f"open it with the console command 'open {cfg.own_level}'")
+    else:
+        for path, data in new_pkgs.items():
+            c, i = fs.index[path]
+            chunks.append(ChunkIn(c.chunk_ids[i], data, path))
+        chunks.append(ChunkIn(container_header_chunk_id(cid),
+                              retarget_container_header(lvl_container.read_entry(hdr_idx), cid)))
     with open(os.path.join(os.path.dirname(__file__), "empty_mod.pak"), "rb") as f:
         pak_template = f.read()
     base = os.path.join(out_dir, pak_name)
@@ -1248,7 +1282,8 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     rep.out_files = [base + ext for ext in (".utoc", ".ucas", ".pak")]
     rep.packages = len(new_pkgs)
     progress(0.93, "checking the result")
-    rep.checks += verify_wp(base + ".utoc", ws, new_pkgs, payloads, rules)
+    rep.checks += verify_wp(base + ".utoc", ws, new_pkgs, payloads, rules,
+                            {p: np_ for p, (np_, _) in out_pkgs.items()} if cfg.own_level else None)
     return rep
 
 
@@ -1271,11 +1306,18 @@ def _drop_streaming_mips(payload: bytes, names) -> tuple[bytes, bool]:
     return _hdr_for([x for x in h if x not in (12, 13)]) + body, True
 
 
-def verify_wp(utoc: str, ws: WPSource, new_pkgs: dict, payloads: dict, rules) -> list[str]:
+def verify_wp(utoc: str, ws: WPSource, new_pkgs: dict, payloads: dict, rules,
+              path_map: dict | None = None) -> list[str]:
     from ..extract.bakeddata import read_baked
     from ..extract.pacenote_table import read_pacenote_table
     out = []
-    c = Container(utoc)
+    c_ = Container(utoc)
+
+    class _C:                                  # reads by original path (own level: renamed in the container)
+        @staticmethod
+        def read(p):
+            return c_.read((path_map or {}).get(p, p))
+    c = _C()
     bad = 0
     n_patched = 0
     bad_names = collections.Counter()

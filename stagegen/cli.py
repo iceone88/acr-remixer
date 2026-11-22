@@ -119,8 +119,8 @@ def _build_wp(a, paks: str) -> int:
         fwd = next(p for p, k in ws.route_cells.items() if k == "fwd")
         render_collision(rep.out_files[0], ws.baked, fwd, os.path.join(out, "collision.png"),
                          f"{a.level} seed {a.seed}: built collision (start o, finish #)")
-    except ImportError:
-        pass                                       # no matplotlib (release build)
+    except (ImportError, KeyError):
+        pass                                       # no matplotlib (release build) / own level (renamed paths)
     print(f"placed at offset {tuple(float(x) for x in rep.offset)} m; {rep.packages} packages rewritten; moved " +
           ", ".join(f"{k} {v}" for k, v in rep.moved.most_common(12)))
     for r in rep.relocated:
