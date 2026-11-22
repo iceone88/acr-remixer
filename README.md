@@ -15,8 +15,8 @@ stage. Everything comes from your own game install; nothing is downloaded.
 > Use it offline and at your own risk; it may stop working after game updates.
 
 > **Status: early, good enough for practice.**
-> Wales – Hafren South works well. The other stages are marked
-> *experimental*: they may be undrivable or crash the game for now.
+> Wales – Hafren South and Greece – Elatia work well. The other stages are
+> marked *experimental*: they may look broken or be undrivable for now.
 
 ---
 

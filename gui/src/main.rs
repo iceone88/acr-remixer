@@ -27,7 +27,7 @@ const STAGES: &[(&str, &str)] = &[
     ("AlsaceS4Saverne", "Alsace – Saverne"),
 ];
 /// Stages verified in-game with the hands-off test; the others are experimental.
-const VERIFIED: &[&str] = &["WalesS4HafrenSouth"];
+const VERIFIED: &[&str] = &["WalesS4HafrenSouth", "GreeceS3Elatia"];
 
 #[cfg(embedded_backend)]
 const BACKEND: Option<&[u8]> = Some(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../packaging/dist/stagegen-backend.exe")));
