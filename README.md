@@ -1,8 +1,8 @@
-﻿# acr-stagegen
+﻿# ACR Remixer
 
-**New rally stages for Assetto Corsa Rally, generated from the stages you already own.**
+**New rally stages for Assetto Corsa Rally, remixed from the stages you already own.**
 
-acr-stagegen cuts the official stages into pieces and stitches them together in a
+ACR Remixer (formerly *acr-stagegen*) cuts the official stages into pieces and stitches them together in a
 new order: new corners, new sequences, new pacenotes. Every seed is a different
 stage. Everything comes from your own game install; nothing is downloaded.
 
@@ -10,7 +10,7 @@ stage. Everything comes from your own game install; nothing is downloaded.
 
 > **Unofficial fan project.** Not affiliated with, endorsed by or supported by
 > Kunos Simulazioni, Supernova Games Studios or the publisher of Assetto Corsa
-> Rally. "Assetto Corsa" is a trademark of its owner. acr-stagegen contains no
+> Rally. "Assetto Corsa" is a trademark of its owner. ACR Remixer contains no
 > game files: stages are generated on your PC from your own copy of the game.
 > Use it offline and at your own risk; it may stop working after game updates.
 
@@ -22,7 +22,7 @@ stage. Everything comes from your own game install; nothing is downloaded.
 
 ## Quick start
 
-1. **Download** `acr-stagegen.exe` from the
+1. **Download** `acr-remixer.exe` from the
    [latest nightly release](../../releases/tag/nightly). It is a single file;
    there's nothing to install.
 2. **Start it.** Windows may show a blue "Windows protected your PC" box
@@ -37,7 +37,7 @@ stage. Everything comes from your own game install; nothing is downloaded.
    (ACR is closed first if it's running). Tick *Start ACR afterwards* to jump
    straight in.
 
-![The acr-stagegen window with a generated stage](docs/gui-map.png)
+![The ACR Remixer window with a generated stage](docs/gui-map.png)
 
 ## Driving your stage
 
@@ -98,7 +98,7 @@ A camera tour through a generated stage, from the start (top left) to the finish
   changed.
 - **Online / leaderboards:** play generated stages offline and don't submit
   times from them; the optional firewall block helps with that.
-- **Game updates** may break it until acr-stagegen is updated.
+- **Game updates** may break it until ACR Remixer is updated.
 - Known rough edges: the service park can look odd, small seams at the joins,
   and a few distant hills may look out of place.
 

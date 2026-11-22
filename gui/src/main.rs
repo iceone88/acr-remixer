@@ -1,4 +1,4 @@
-//! acr-stagegen GUI (egui). Phase 1: drives the Python pipeline
+//! ACR Remixer GUI (egui; formerly acr-stagegen). Phase 1: drives the Python pipeline
 //! (`python -m stagegen.cli build ...`) and previews the result; the pipeline is
 //! being ported to Rust module by module.
 #![windows_subsystem = "windows"]
@@ -491,7 +491,7 @@ impl App {
     fn export_bug_report(&self) -> Result<PathBuf, String> {
         let p = &self.prefs;
         let mut r = String::new();
-        r.push_str(&format!("acr-stagegen bug report\nversion: {VERSION}\nbackend: {}\nwindows: {}\n\n",
+        r.push_str(&format!("ACR Remixer bug report\nversion: {VERSION}\nbackend: {}\nwindows: {}\n\n",
             if p.use_python || BACKEND.is_none() { "python (development)" } else { "embedded" }, windows_version()));
         r.push_str(&format!("share code: {}\n", share_code(p)));
         let inst: Vec<&str> = self.installed.iter().map(|i| i.name.as_str()).collect();
@@ -512,7 +512,7 @@ impl App {
         r.push_str(&acr_crashes(3));
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let dir = if Path::new(&p.out_dir).is_dir() { PathBuf::from(&p.out_dir) } else { std::env::temp_dir() };
-        let path = dir.join(format!("acr-stagegen-bugreport-{stamp}.txt"));
+        let path = dir.join(format!("acr-remixer-bugreport-{stamp}.txt"));
         std::fs::write(&path, redact(&r)).map_err(|e| e.to_string())?;
         Ok(path)
     }
@@ -713,7 +713,7 @@ impl eframe::App for App {
         let mut want_segments = false;
         let pv_seq = self.preview.as_ref().map(|pv| pv.sequence.clone()).filter(|s| !s.is_empty());
         egui::SidePanel::left("opts").min_width(330.0).show(ctx, |ui| {
-            ui.heading("acr-stagegen");
+            ui.heading("ACR Remixer");
             ui.add_space(6.0);
             egui::CollapsingHeader::new("Setup").default_open(self.prefs.acr_dir.is_empty()).show(ui, |ui| {
                 let p = &mut self.prefs;
@@ -879,7 +879,7 @@ impl eframe::App for App {
                         Err(e) => self.log.push_str(&format!("bug report: {e}\n")),
                     }
                 }
-                ui.small(format!("acr-stagegen {VERSION}"));
+                ui.small(format!("ACR Remixer {VERSION}"));
             });
         });
 
@@ -941,8 +941,9 @@ impl eframe::App for App {
 
 fn main() -> eframe::Result<()> {
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 700.0]).with_title("acr-stagegen"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 700.0]).with_title("ACR Remixer"),
         ..Default::default()
     };
+    // the app id stays "acr-stagegen": eframe stores the saved settings under it
     eframe::run_native("acr-stagegen", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }

@@ -1,4 +1,4 @@
-# Nightly release: one standalone acr-stagegen.exe (Rust/egui GUI with the
+# Nightly release: one standalone acr-remixer.exe (Rust/egui GUI with the
 # frozen Python backend and the open-source Oodle shim embedded), published as
 # the "nightly" pre-release. Runs every night if main changed, or by hand.
 name: nightly
@@ -77,9 +77,9 @@ jobs:
           $date = Get-Date -Format "yyyy-MM-dd"
           $short = $env:GITHUB_SHA.Substring(0, 7)
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item gui/target/release/acr-stagegen.exe dist/acr-stagegen.exe
+          Copy-Item gui/target/release/acr-remixer.exe dist/acr-remixer.exe
           $log = git log -15 --pretty=format:"- %s (%h)"
           $notes = "Nightly build $date ($short). Unsigned; Windows SmartScreen may warn.`n`nVerified in-game: Wales - Hafren South, Greece - Elatia; other stages are experimental.`n`nRecent changes:`n$log"
           gh release delete nightly --yes --cleanup-tag 2>$null   # none on the first run
           $global:LASTEXITCODE = 0
-          gh release create nightly dist/acr-stagegen.exe --prerelease --target $env:GITHUB_SHA --title "Nightly $date" --notes "$notes"
+          gh release create nightly dist/acr-remixer.exe --prerelease --target $env:GITHUB_SHA --title "Nightly $date" --notes "$notes"

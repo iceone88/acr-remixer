@@ -1,11 +1,11 @@
 [package]
-name = "acr-stagegen-gui"
+name = "acr-remixer-gui"
 version = "0.1.0"
 edition = "2021"
-description = "Procedural stage generator for Assetto Corsa Rally (GUI)"
+description = "ACR Remixer: new rally stages remixed from Assetto Corsa Rally's own (GUI)"
 
 [[bin]]
-name = "acr-stagegen"
+name = "acr-remixer"
 path = "src/main.rs"
 
 [dependencies]

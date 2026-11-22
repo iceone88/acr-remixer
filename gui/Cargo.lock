@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "acr-stagegen-gui"
+name = "acr-remixer-gui"
 version = "0.1.0"
 dependencies = [
  "eframe",

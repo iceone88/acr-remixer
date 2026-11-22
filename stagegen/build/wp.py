@@ -435,7 +435,9 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
 
     def rigid(j, p_m, rot):
         pc = pieces[j]
-        return pc.R @ p_m + pc.t, (rot if rot is not None else np.zeros(3)) + np.array([0, np.degrees(pc.yaw), 0])
+        r = (rot if rot is not None else np.zeros(3)) + np.array([0, np.degrees(pc.yaw), 0])
+        r[1] = (r[1] + 180.0) % 360.0 - 180.0          # piece yaws add up (repeats, reversals)
+        return pc.R @ p_m + pc.t, r
 
     def along(p_m, rot, idx):
         """Keep the relative position along the route (fraction of length), facing the same way."""
@@ -444,7 +446,9 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
         dh = new_head[j] - src_head[idx]
         off = (p_m[:2] - src.points[idx, :2]) @ rot_z(dh)[:2, :2].T
         loc = np.r_[new_cl[j, :2] + off, new_cl[j, 2] + (p_m[2] - src.points[idx, 2])]
-        return loc, (rot if rot is not None else np.zeros(3)) + np.array([0, np.degrees(dh), 0]), s_new
+        r = (rot if rot is not None else np.zeros(3)) + np.array([0, np.degrees(dh), 0])
+        r[1] = (r[1] + 180.0) % 360.0 - 180.0
+        return loc, r, s_new
 
     # ---- route stretches no track tile covers (start areas etc.) live on the
     # coarse backdrop terrain (SM_<Level>TerrainYYXX); it follows the piece
