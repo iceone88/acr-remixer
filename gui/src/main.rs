@@ -161,6 +161,77 @@ fn fw_set(acr_dir: &str, block: bool) -> Result<(), String> {
     Ok(())
 }
 
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")");
+
+/// Hide the Windows user name in paths before text leaves the PC.
+fn redact(s: &str) -> String {
+    let mut out = s.to_string();
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        out = out.replace(&home, "%USERPROFILE%");
+    }
+    if let Ok(user) = std::env::var("USERNAME") {
+        if user.len() >= 3 {
+            out = out.replace(&user, "<user>");
+        }
+    }
+    out
+}
+
+/// Short code for stage + length + seed + foliage: "WalesS4HafrenSouth/4500/939252/FGL".
+fn share_code(p: &Prefs) -> String {
+    let fol: String = [(p.forest, 'F'), (p.grass, 'G'), (p.foliage, 'L')]
+        .iter().map(|(on, c)| if *on { *c } else { '-' }).collect();
+    format!("{}/{:.0}/{}/{}", p.stage, p.length_m, p.seed, fol)
+}
+
+fn apply_share_code(p: &mut Prefs, code: &str) -> Result<(), String> {
+    let parts: Vec<&str> = code.trim().split('/').collect();
+    if parts.len() != 4 {
+        return Err("expected Stage/Length/Seed/Foliage, e.g. WalesS4HafrenSouth/4500/1/FGL".into());
+    }
+    if !STAGES.iter().any(|s| s.0 == parts[0]) {
+        return Err(format!("unknown stage {:?}", parts[0]));
+    }
+    let len: f32 = parts[1].parse().map_err(|_| "bad length")?;
+    let seed: u32 = parts[2].parse().map_err(|_| "bad seed")?;
+    p.stage = parts[0].to_string();
+    p.length_m = len.clamp(1000.0, 15000.0);
+    p.seed = seed.max(1);
+    p.forest = parts[3].contains('F');
+    p.grass = parts[3].contains('G');
+    p.foliage = parts[3].contains('L');
+    Ok(())
+}
+
+/// Summary of the newest ACR crash reports (error + top of the call stack).
+fn acr_crashes(n: usize) -> String {
+    let Ok(base) = std::env::var("LOCALAPPDATA") else { return "(no LOCALAPPDATA)\n".into() };
+    let dir = PathBuf::from(base).join(r"acr\Saved\Crashes");
+    let Ok(rd) = std::fs::read_dir(&dir) else { return "(no crash reports)\n".into() };
+    let mut ds: Vec<_> = rd.filter_map(|e| e.ok()).filter(|e| e.path().is_dir())
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path()))).collect();
+    ds.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out = String::new();
+    for (t, d) in ds.into_iter().take(n) {
+        let age = t.elapsed().map(|e| e.as_secs() / 60).unwrap_or(0);
+        let txt = std::fs::read_to_string(d.join("CrashContext.runtime-xml")).unwrap_or_default();
+        let tag = |name: &str| -> String {
+            let (a, b) = (format!("<{name}>"), format!("</{name}>"));
+            txt.find(&a).and_then(|i| txt[i + a.len()..].find(&b).map(|j| txt[i + a.len()..i + a.len() + j].trim().to_string()))
+                .unwrap_or_default()
+        };
+        let stack: Vec<String> = tag("PCallStack").lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).take(15).collect();
+        out.push_str(&format!("--- crash {} min ago: {}\n{}\n", age, tag("ErrorMessage"), stack.join("\n")));
+    }
+    if out.is_empty() { "(no crash reports)\n".into() } else { out }
+}
+
+fn windows_version() -> String {
+    quiet(Command::new("cmd").args(["/c", "ver"])).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "?".into())
+}
+
 /// The finished route of a built stage (from layout.json).
 struct Preview {
     name: String,
@@ -224,6 +295,8 @@ struct App {
     /// generated stage in ~mods, firewall block present (refreshed on events)
     installed: Option<String>,
     blocked: bool,
+    /// share-code text field (paste a code here to load it)
+    code_input: String,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -237,7 +310,7 @@ impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
         let mut app = App { prefs, log: String::new(), job: None, preview: None, tab: Tab::Map,
-                            installed: None, blocked: false };
+                            installed: None, blocked: false, code_input: String::new() };
         app.preview = load_preview(&app.out_for(app.prefs.seed)).ok();     // reopen the last stage
         app.refresh_install_state();
         app
@@ -317,6 +390,35 @@ impl App {
             }
             self.blocked = fw_blocked();
         }
+    }
+
+    /// Write one text file with everything useful for a bug report; returns its path.
+    fn export_bug_report(&self) -> Result<PathBuf, String> {
+        let p = &self.prefs;
+        let mut r = String::new();
+        r.push_str(&format!("acr-stagegen bug report\nversion: {VERSION}\nbackend: {}\nwindows: {}\n\n",
+            if p.use_python || BACKEND.is_none() { "python (development)" } else { "embedded" }, windows_version()));
+        r.push_str(&format!("share code: {}\n", share_code(p)));
+        r.push_str(&format!("installed stage: {}\nonline blocked: {}\n\n",
+            self.installed.as_deref().unwrap_or("none"), self.blocked));
+        r.push_str("=== settings ===\n");
+        r.push_str(&serde_json::to_string_pretty(p).unwrap_or_default());
+        r.push_str("\n\n=== last stage ===\n");
+        match &self.preview {
+            Some(pv) => r.push_str(&format!("{}: {:.2} km, {} pieces (joins at {:?} m), {} pacenotes\n",
+                pv.name, pv.length / 1000.0, pv.joins.len() + 1,
+                pv.joins.iter().map(|j| j.round()).collect::<Vec<_>>(), pv.notes)),
+            None => r.push_str("(none loaded)\n"),
+        }
+        r.push_str("\n=== log of the last run ===\n");
+        r.push_str(if self.log.is_empty() { "(empty)\n" } else { &self.log });
+        r.push_str("\n=== ACR crash reports (newest first) ===\n");
+        r.push_str(&acr_crashes(3));
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let dir = if Path::new(&p.out_dir).is_dir() { PathBuf::from(&p.out_dir) } else { std::env::temp_dir() };
+        let path = dir.join(format!("acr-stagegen-bugreport-{stamp}.txt"));
+        std::fs::write(&path, redact(&r)).map_err(|e| e.to_string())?;
+        Ok(path)
     }
 
     /// Remove installed generated stages from the game (restores the originals).
@@ -578,6 +680,41 @@ impl eframe::App for App {
                 ui.label(format!("{}: {:.2} km, {} pieces, {} pacenotes", pv.name, pv.length / 1000.0,
                                  pv.joins.len() + 1, pv.notes));
             }
+            ui.separator();
+            egui::CollapsingHeader::new("Share & bug report").show(ui, |ui| {
+                let code = share_code(&self.prefs);
+                ui.horizontal(|ui| {
+                    ui.label("Share code:");
+                    ui.monospace(&code);
+                    if ui.small_button("Copy").on_hover_text("Same code = same stage for anyone").clicked() {
+                        ui.ctx().copy_text(code.clone());
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.code_input).hint_text("paste a share code")
+                        .desired_width(220.0));
+                    if ui.add_enabled(!busy, egui::Button::new("Load")).clicked() {
+                        let input = self.code_input.clone();
+                        match apply_share_code(&mut self.prefs, &input) {
+                            Ok(()) => self.log.push_str(&format!("loaded share code {}\n", input.trim())),
+                            Err(e) => self.log.push_str(&format!("share code: {e}\n")),
+                        }
+                    }
+                });
+                if ui.button("Export bug report").on_hover_text(
+                    "Writes one text file (settings, last log, ACR crash reports; your user name is hidden) \
+                     to attach to a bug report").clicked()
+                {
+                    match self.export_bug_report() {
+                        Ok(path) => {
+                            self.log.push_str(&format!("bug report written: {}\n", redact(&path.display().to_string())));
+                            let _ = Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+                        }
+                        Err(e) => self.log.push_str(&format!("bug report: {e}\n")),
+                    }
+                }
+                ui.small(format!("acr-stagegen {VERSION}"));
+            });
         });
 
         if block_changed && !busy {
