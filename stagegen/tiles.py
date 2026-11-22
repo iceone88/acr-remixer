@@ -248,7 +248,7 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
         pc = Piece("segment", pts, r.seg.widths(False), r.id, False, 0.0, np.zeros(3), r.seg.pacenotes(False) or [])
         beam.append(TState(None, pc, r, r.a, r.b, ext.p.copy(), ext.line, ext.heading, ext.grade, ext.width,
                            ext.s, r.tiles, _coarse(pts, cfg), bias[r.id]))
-    finished = []
+    finished, near = [], []
     for _ in range(60):
         nxt = []
         for st in beam:
@@ -275,8 +275,7 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
                     L = st.length + r.seg.length
                     if not is_fin and L + min_fin > hi_len:
                         continue
-                    if is_fin and not (lo_len <= L <= hi_len):
-                        continue
+                    in_range = lo_len <= L <= hi_len
                     cxy = _coarse(pts, cfg)
                     if _too_close(st, cxy, cfg):
                         continue
@@ -291,7 +290,12 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
                     kid = TState(st, pc, r, r.b if rev else r.a, r.a if rev else r.b, R @ ext.p + trans,
                                  ext.line + yaw, h_out, -ext.grade if rev else ext.grade, ext.width, L,
                                  st.tiles | r.tiles, cxy, pen, st.kinks + [float(np.degrees(kink))])
-                    (finished if is_fin else kids).append(kid)
+                    if not is_fin:
+                        kids.append(kid)
+                    elif in_range:
+                        finished.append(kid)
+                    else:
+                        near.append(kid)          # complete stage, wrong length: fallback
             rnd.shuffle(kids)
             kids.sort(key=lambda s: s.penalty / max(s.length / 1000, 0.5))
             nxt += kids[: cfg.branch_per_state]
@@ -305,5 +309,9 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
         if not beam or len(finished) >= cfg.beam_width:
             break
     if not finished:
-        return None
+        # requested length not achievable: the complete stage closest to it
+        if not near:
+            return None
+        return min(near, key=lambda s: (round(abs(s.length - cfg.target_length) / 250),
+                                        s.penalty / max(s.length / 1000, 0.5)))
     return min(finished, key=lambda s: s.penalty / max(s.length / 1000, 0.5))

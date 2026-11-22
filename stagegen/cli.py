@@ -67,6 +67,9 @@ def _build_wp(a, paks: str) -> int:
         print(f"no layout found: {hint}")
         return 1
     layout = build_layout(best, 2.0)
+    if abs(best.length - a.length) > cfg.length_tolerance * a.length:
+        print(f"note: {a.length/1000:.1f} km is not achievable from {a.level}; using the closest: "
+              f"{best.length/1000:.2f} km")
     order = " ".join(p.segment_id.split("#")[1] + ("r" if p.reversed else "") for p in layout.pieces)
     print(f"layout {layout.length/1000:.2f} km in {time.time()-t:.1f}s: pieces {order}, "
           f"kinks {', '.join(f'{k:+.0f}' for k in best.kinks)} deg, {len(layout.pacenotes)} calls")
