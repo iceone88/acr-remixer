@@ -1,6 +1,6 @@
 ﻿# ACR Remixer
 
-[![Download nightly](https://img.shields.io/badge/download-nightly-2ea44f?logo=github)](../../releases/tag/nightly)
+[![Download](https://img.shields.io/badge/download-newest%20build-2ea44f?logo=github)](../../releases)
 [![Nightly build](https://github.com/vale981/acr-remixer/actions/workflows/nightly.yml/badge.svg)](../../actions/workflows/nightly.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![REUSE compliant](https://img.shields.io/badge/REUSE-compliant-green)](https://reuse.software)
@@ -39,9 +39,10 @@ stage. Everything comes from your own game install; nothing is downloaded.
 
 ## Quick start
 
-1. **Download** `acr-remixer.exe` from the
-   [latest nightly release](../../releases/tag/nightly). It is a single file;
-   there's nothing to install.
+1. **Download** `acr-remixer.exe` from the topmost entry on the
+   [Releases page](../../releases): that's the newest build, either a version
+   release (e.g. *ACR Remixer v0.1.0*) or the *nightly* with the latest changes,
+   whichever is newer. It is a single file; there's nothing to install.
 2. **Start it.** Windows may show a blue "Windows protected your PC" box
    because the program is not signed: click *More info* → *Run anyway*.
 3. The program **finds Assetto Corsa Rally by itself** (through Steam). If it
