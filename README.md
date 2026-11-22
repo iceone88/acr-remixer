@@ -191,7 +191,11 @@ Use, change and share it freely, including in your own projects; just keep the
 copyright notice and the license text (that's the attribution).
 
 This covers ACR Remixer's own code only. It contains no game files: everything
-it builds comes from your own copy of Assetto Corsa Rally. Third-party parts
+it builds comes from your own copy of Assetto Corsa Rally. The in-game
+screenshots in `docs/` show the game's content, which belongs to its owners and
+is not under the MIT license. Every file's license is recorded following the
+[REUSE](https://reuse.software) specification (SPDX headers, `REUSE.toml`,
+`LICENSES/`). Third-party parts
 keep their own licenses, e.g. [oozextract](https://crates.io/crates/oozextract)
 (MIT) in `oodle_shim/`, [egui](https://github.com/emilk/egui) (MIT/Apache-2.0),
 numpy and scipy (BSD).

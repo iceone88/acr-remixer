@@ -1,0 +1,31 @@
+version = 1
+SPDX-PackageName = "ACR Remixer"
+SPDX-PackageSupplier = "hiro98 (vale981) <acr-remix@protagon.space>"
+
+# files that cannot carry a header comment (docs, config, lock files, binary data)
+[[annotations]]
+path = [
+    ".github/**",
+    "**/.gitignore",
+    "**/Cargo.toml",
+    "**/Cargo.lock",
+    "requirements.txt",
+    "README.md",
+    "FINDINGS.md",
+    "REUSE.toml",
+    "docs/gui-*.png",
+    "stagegen/build/empty_mod.pak",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 hiro98 (vale981) and the ACR Remixer contributors"
+SPDX-License-Identifier = "MIT"
+
+# screenshots of the game: the game content shown is not ours
+[[annotations]]
+path = ["docs/ingame-forest.jpg", "docs/tour.jpg"]
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "Kunos Simulazioni / the publisher of Assetto Corsa Rally (game content shown)",
+    "2026 hiro98 (vale981) and the ACR Remixer contributors (screenshot)",
+]
+SPDX-License-Identifier = "LicenseRef-GameScreenshot"

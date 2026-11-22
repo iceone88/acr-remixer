@@ -1,0 +1,10 @@
+Screenshots of Assetto Corsa Rally
+
+These images are screenshots of the game Assetto Corsa Rally, taken to show
+what ACR Remixer produces. The game content they show (landscapes, cars,
+models, textures, user interface) belongs to its owners (Kunos Simulazioni /
+the publisher of Assetto Corsa Rally) and is NOT covered by the MIT license
+of ACR Remixer.
+
+They are included only to document this project. No permission to reuse the
+game content is granted or implied.
