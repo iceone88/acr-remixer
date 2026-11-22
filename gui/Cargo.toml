@@ -3,6 +3,7 @@ name = "acr-remixer-gui"
 version = "0.1.0"
 edition = "2021"
 description = "ACR Remixer: new rally stages remixed from Assetto Corsa Rally's own (GUI)"
+license = "MIT"
 
 [[bin]]
 name = "acr-remixer"

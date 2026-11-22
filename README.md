@@ -176,3 +176,15 @@ sheet, all hands-off.
 - `mesh_clip.py` / `hlod.py` cooked static mesh LODs; `foliage.py` (H)ISM
   instances, cluster trees, FBox / box-sphere bounds.
 - `wp_hash.py` World Partition runtime spatial hash; `build/cityhash.py` CityHash64.
+
+## License
+
+[MIT](LICENSE): © 2026 hiro98 (vale981) and the ACR Remixer contributors.
+Use, change and share it freely, including in your own projects; just keep the
+copyright notice and the license text (that's the attribution).
+
+This covers ACR Remixer's own code only. It contains no game files: everything
+it builds comes from your own copy of Assetto Corsa Rally. Third-party parts
+keep their own licenses, e.g. [oozextract](https://crates.io/crates/oozextract)
+(MIT) in `oodle_shim/`, [egui](https://github.com/emilk/egui) (MIT/Apache-2.0),
+numpy and scipy (BSD).
