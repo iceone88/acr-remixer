@@ -1,0 +1,82 @@
+# Nightly release: one standalone acr-stagegen.exe (Rust/egui GUI with the
+# frozen Python backend and the open-source Oodle shim embedded), published as
+# the "nightly" pre-release. Runs every night if main changed, or by hand.
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if nothing changed since the last nightly
+        id: changed
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $last = gh release view nightly --json targetCommitish -q .targetCommitish 2>$null
+          if ($env:GITHUB_EVENT_NAME -eq "schedule" -and $last -eq $env:GITHUB_SHA) {
+            "build=false" >> $env:GITHUB_OUTPUT; "no changes since the last nightly"
+          } else { "build=true" >> $env:GITHUB_OUTPUT }
+
+      - uses: actions/setup-python@v5
+        if: steps.changed.outputs.build == 'true'
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Python dependencies
+        if: steps.changed.outputs.build == 'true'
+        run: python -m pip install -r requirements.txt pyinstaller
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.changed.outputs.build == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.changed.outputs.build == 'true'
+        with:
+          workspaces: |
+            oodle_shim
+            gui
+
+      - name: Oodle shim (open-source decompressor DLL)
+        if: steps.changed.outputs.build == 'true'
+        run: cargo build --release --manifest-path oodle_shim/Cargo.toml
+
+      - name: Frozen backend
+        if: steps.changed.outputs.build == 'true'
+        run: python -m PyInstaller packaging/backend.spec --distpath packaging/dist --workpath packaging/build --noconfirm
+
+      - name: Backend smoke test
+        if: steps.changed.outputs.build == 'true'
+        run: packaging/dist/stagegen-backend.exe --help
+
+      - name: GUI (embeds the backend)
+        if: steps.changed.outputs.build == 'true'
+        run: cargo build --release --manifest-path gui/Cargo.toml
+
+      - name: Publish the nightly pre-release
+        if: steps.changed.outputs.build == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $date = Get-Date -Format "yyyy-MM-dd"
+          $short = $env:GITHUB_SHA.Substring(0, 7)
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item gui/target/release/acr-stagegen.exe dist/acr-stagegen.exe
+          $log = git log -15 --pretty=format:"- %s (%h)"
+          $notes = "Nightly build $date ($short). Unsigned; Windows SmartScreen may warn.`n`nOnly Wales - Hafren South is verified in-game; other stages are experimental.`n`nRecent changes:`n$log"
+          gh release delete nightly --yes --cleanup-tag 2>$null
+          gh release create nightly dist/acr-stagegen.exe --prerelease --target $env:GITHUB_SHA --title "Nightly $date" --notes "$notes"

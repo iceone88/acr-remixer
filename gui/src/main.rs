@@ -29,6 +29,30 @@ const STAGES: &[(&str, &str)] = &[
 /// Stages verified in-game with the hands-off test; the others are experimental.
 const VERIFIED: &[&str] = &["WalesS4HafrenSouth"];
 
+#[cfg(embedded_backend)]
+const BACKEND: Option<&[u8]> = Some(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../packaging/dist/stagegen-backend.exe")));
+#[cfg(not(embedded_backend))]
+const BACKEND: Option<&[u8]> = None;
+
+/// Unpack the embedded backend once (the name carries a content hash, so a
+/// new release replaces it) and return its path.
+fn embedded_backend() -> Result<PathBuf, String> {
+    let bytes = BACKEND.ok_or("this build has no embedded backend")?;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes.iter().step_by(64) {
+        h = (h ^ *b as u64).wrapping_mul(0x100_0000_01b3);
+    }
+    let dir = PathBuf::from(std::env::var("LOCALAPPDATA").map_err(|e| e.to_string())?).join("acr-stagegen");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let exe = dir.join(format!("stagegen-backend-{:x}-{:016x}.exe", bytes.len(), h));
+    if !exe.is_file() {
+        let tmp = exe.with_extension("tmp");
+        std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &exe).map_err(|e| e.to_string())?;
+    }
+    Ok(exe)
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 struct Prefs {
@@ -45,6 +69,8 @@ struct Prefs {
     foliage: bool,
     install: bool,
     launch: bool,
+    /// development: run `python -m stagegen.cli` from backend_dir instead of the embedded backend
+    use_python: bool,
 }
 
 impl Default for Prefs {
@@ -72,6 +98,7 @@ impl Default for Prefs {
             foliage: true,
             install: true,
             launch: false,
+            use_python: BACKEND.is_none(),
         }
     }
 }
@@ -119,7 +146,7 @@ fn load_preview(dir: &Path) -> Result<Preview, String> {
 
 enum Msg {
     Line(String),
-    Done { ok: bool, out: PathBuf },
+    Done { ok: bool, out: Option<PathBuf> },
 }
 
 struct Job {
@@ -171,7 +198,7 @@ impl App {
         let last = job.remaining.is_empty();
         let p = self.prefs.clone();
         let mut args: Vec<String> = vec![
-            "-m".into(), "stagegen.cli".into(), "build".into(),
+            "build".into(),
             "--level".into(), p.stage.clone(),
             "--length".into(), format!("{:.0}", p.length_m),
             "--seed".into(), seed.to_string(),
@@ -189,7 +216,33 @@ impl App {
         let (tx, rx) = channel();
         job.rx = rx;
         self.log.push_str(&format!("\n=== {} seed {} ===\n", p.stage, seed));
-        spawn_build(p.python, p.backend_dir, args, out, tx);
+        match backend_cmd(&p) {
+            Ok((prog, mut full, cwd)) => {
+                full.extend(args);
+                spawn_build(prog, cwd, full, Some(out), tx);
+            }
+            Err(e) => {
+                self.log.push_str(&format!("backend: {e}\n"));
+                self.job = None;
+            }
+        }
+    }
+
+    /// Remove installed generated stages from the game (restores the originals).
+    fn uninstall(&mut self) {
+        let p = self.prefs.clone();
+        self.log.push_str("\n=== uninstall ===\n");
+        self.tab = Tab::Log;
+        let paks = PathBuf::from(&p.acr_dir).join(r"acr\Content\Paks").display().to_string();
+        match backend_cmd(&p) {
+            Ok((prog, mut full, cwd)) => {
+                full.extend(["uninstall".to_string(), "--paks".into(), paks]);
+                let (tx, rx) = channel();
+                self.job = Some(Job { rx, remaining: vec![] });
+                spawn_build(prog, cwd, full, None, tx);
+            }
+            Err(e) => self.log.push_str(&format!("backend: {e}\n")),
+        }
     }
 
     fn poll(&mut self) {
@@ -207,12 +260,14 @@ impl App {
         }
         if let Some((ok, out)) = finished {
             if ok {
-                match load_preview(&out) {
-                    Ok(pv) => {
-                        self.preview = Some(pv);
-                        self.tab = Tab::Map;
+                if let Some(out) = out {
+                    match load_preview(&out) {
+                        Ok(pv) => {
+                            self.preview = Some(pv);
+                            self.tab = Tab::Map;
+                        }
+                        Err(e) => self.log.push_str(&format!("preview: {e}\n")),
                     }
-                    Err(e) => self.log.push_str(&format!("preview: {e}\n")),
                 }
                 self.next();
             } else {
@@ -223,7 +278,21 @@ impl App {
     }
 }
 
-fn spawn_build(python: String, cwd: String, args: Vec<String>, out: PathBuf, tx: Sender<Msg>) {
+/// (program, leading args, working dir) of the backend: the embedded exe, or
+/// `python -m stagegen.cli` in development.
+fn backend_cmd(p: &Prefs) -> Result<(String, Vec<String>, String), String> {
+    if p.use_python || BACKEND.is_none() {
+        if !Path::new(&p.backend_dir).join("stagegen").is_dir() {
+            return Err(format!("no stagegen package in {:?}", p.backend_dir));
+        }
+        return Ok((p.python.clone(), vec!["-m".into(), "stagegen.cli".into()], p.backend_dir.clone()));
+    }
+    let exe = embedded_backend()?;
+    let cwd = exe.parent().map(|d| d.display().to_string()).unwrap_or_default();
+    Ok((exe.display().to_string(), vec![], cwd))
+}
+
+fn spawn_build(python: String, cwd: String, args: Vec<String>, out: Option<PathBuf>, tx: Sender<Msg>) {
     std::thread::spawn(move || {
         use std::os::windows::process::CommandExt;
         let child = Command::new(&python)
@@ -291,10 +360,15 @@ impl eframe::App for App {
                         p.acr_dir = d.display().to_string();
                     }
                 }
-                let be_ok = Path::new(&p.backend_dir).join("stagegen").is_dir();
-                path_row(ui, "Backend", &mut p.backend_dir, be_ok);
-                path_row(ui, "Python", &mut p.python, true);
                 path_row(ui, "Output", &mut p.out_dir, true);
+                if BACKEND.is_some() {
+                    ui.checkbox(&mut p.use_python, "Use Python backend (development)");
+                }
+                if p.use_python || BACKEND.is_none() {
+                    let be_ok = Path::new(&p.backend_dir).join("stagegen").is_dir();
+                    path_row(ui, "Backend", &mut p.backend_dir, be_ok);
+                    path_row(ui, "Python", &mut p.python, true);
+                }
             });
             ui.separator();
             ui.add_enabled_ui(!busy, |ui| {
@@ -334,7 +408,8 @@ impl eframe::App for App {
             });
             ui.add_space(8.0);
             let ready = steam::is_acr_dir(Path::new(&self.prefs.acr_dir))
-                && Path::new(&self.prefs.backend_dir).join("stagegen").is_dir();
+                && (BACKEND.is_some() && !self.prefs.use_python
+                    || Path::new(&self.prefs.backend_dir).join("stagegen").is_dir());
             ui.horizontal(|ui| {
                 if busy {
                     ui.spinner();
@@ -349,6 +424,13 @@ impl eframe::App for App {
                     }
                 }
             });
+            if !busy
+                && ui.add_enabled(ready, egui::Button::new("Uninstall generated stage"))
+                    .on_hover_text("Remove the installed stage from the game (closes ACR); the original stage is back")
+                    .clicked()
+            {
+                self.uninstall();
+            }
             if !VERIFIED.contains(&self.prefs.stage.as_str()) {
                 ui.colored_label(egui::Color32::from_rgb(230, 170, 60), "Experimental stage: not yet verified in-game.");
             }
