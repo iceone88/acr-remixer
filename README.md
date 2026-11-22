@@ -1,5 +1,13 @@
 ﻿# ACR Remixer
 
+[![Download nightly](https://img.shields.io/badge/download-nightly-2ea44f?logo=github)](../../releases/tag/nightly)
+[![Nightly build](https://github.com/vale981/acr-remixer/actions/workflows/nightly.yml/badge.svg)](../../actions/workflows/nightly.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![REUSE compliant](https://img.shields.io/badge/REUSE-compliant-green)](https://reuse.software)
+![Windows](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows)
+![Assetto Corsa Rally](https://img.shields.io/badge/game-Assetto%20Corsa%20Rally%20(unofficial)-c0392b)
+[![Contributions welcome](https://img.shields.io/badge/contributions-welcome-orange)](#contributing)
+
 **New rally stages for Assetto Corsa Rally, remixed from the stages you already own.**
 
 ACR Remixer (formerly *acr-stagegen*) cuts the official stages into pieces and stitches them together in a
@@ -17,6 +25,8 @@ stage. Everything comes from your own game install; nothing is downloaded.
 > **Status: early, good enough for practice.**
 > Wales – Hafren South and Greece – Elatia work well. The other stages are
 > marked *experimental*: they may look broken or be undrivable for now.
+
+<a id="contributing"></a>
 
 > **Contributions welcome!** Bug reports, ideas, good share codes and pull
 > requests are all appreciated: open an
