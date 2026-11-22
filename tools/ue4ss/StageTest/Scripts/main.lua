@@ -1,12 +1,11 @@
 -- StageTest (acr-stagegen): camera tour of a generated stage for screenshots.
---  * when the player is in a car, waits ~10 s, switches to the debug camera,
---    makes it possess its SpectatorPawn and flies that to each point of
+--  * when the player is in a car, waits ~10 s, switches to the debug camera
+--    and moves its SpectatorPawn to each point of
 --    ../points.txt ("label x y z yaw", Unreal cm / degrees)
 --  * logs "[StageTest] at <label> want=(..) cam=(..)" at each point, "done" at the end
 --  * writes the active CommonUI screens (+ IN_CAR) to ../ui.txt for host-side menu automation
 --  * live hook: ../live.lua is re-run whenever it changes
--- All game calls run via ExecuteInGameThread: calling UFunctions from the async
--- loop thread hangs or crashes the game. Teleporting the physics car crashes it too.
+-- All game calls run via ExecuteInGameThread. Teleporting the physics car crashes the game.
 local here = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("(.*/)")
 local POINTS, LIVE, UI = here .. "../points.txt", here .. "../live.lua", here .. "../ui.txt"
 
@@ -56,12 +55,15 @@ local function debug_cam_active()            -- the debug camera owns the local 
     return ok and p ~= nil and p:IsValid()
 end
 
-local function place(pt)          -- the recipe that worked: FindFirstOf, no Possess
-    local rot = { Pitch = -12, Yaw = pt[5], Roll = 0 }
+local function place(pt)
+    -- K2_SetActorLocation (teleport flag) on the game thread moves the debug camera;
+    -- K2_TeleportTo silently does nothing here. View from 15 m behind, 6 m up.
+    local yaw = math.rad(pt[5])
+    local loc = { X = pt[2] - math.cos(yaw) * 1500, Y = pt[3] - math.sin(yaw) * 1500, Z = pt[4] + 600 }
     local sp = FindFirstOf("SpectatorPawn")
-    if sp and sp:IsValid() then sp:K2_TeleportTo({ X = pt[2], Y = pt[3], Z = pt[4] + 400 }, rot) end
+    if sp and sp:IsValid() then sp:K2_SetActorLocation(loc, false, {}, true) end
     local d = FindFirstOf("DebugCameraController")
-    if d and d:IsValid() then d:SetControlRotation(rot) end
+    if d and d:IsValid() then d:SetControlRotation({ Pitch = -15, Yaw = pt[5], Roll = 0 }) end
     return true
 end
 
@@ -113,9 +115,11 @@ end
 local function restart() state, points, i, t, done = "wait_car", nil, 0, 0, false end
 StageTestAPI = { console = console, place = place, restart = restart, insts = insts, inst = inst }
 
-LoopAsync(500, function()                      -- same thread model as the tour that worked
-    local ok, err = pcall(step)
-    if not ok then print("[StageTest] error: " .. tostring(err) .. "\n") end
+LoopAsync(500, function()
+    ExecuteInGameThread(function()
+        local ok, err = pcall(step)
+        if not ok then print("[StageTest] error: " .. tostring(err) .. "\n") end
+    end)
     return false
 end)
 

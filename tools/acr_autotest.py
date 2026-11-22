@@ -42,7 +42,8 @@ def wait_ui(pred, timeout: float, what: str) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", required=True)
-    ap.add_argument("--every", type=float, default=800)
+    ap.add_argument("--every", type=float, default=600)
+    ap.add_argument("--drive", action="store_true", help="autopilot drive-through instead of the camera tour")
     a = ap.parse_args()
     import vgamepad as vg
     from acr_harness import BUTTONS, focus, kill
@@ -103,6 +104,14 @@ def main():
             press("A")
     print("in car:", ui(), flush=True)
     del pad
+    if a.drive:                                          # autopilot drive-through instead of the camera tour
+        import glob
+        time.sleep(8)
+        utoc = glob.glob(os.path.join(a.build, "*_Stagegen_9_P.utoc"))[0]
+        out = os.path.join(os.environ.get("TEMP", "."), "acrshots", "drive")
+        subprocess.run([py, os.path.join(HERE, "acr_autopilot.py"), "--utoc", utoc, "--build", a.build, "--out", out],
+                       check=True)
+        return
     subprocess.run([py, os.path.join(HERE, "acr_shots.py"), "--build", a.build, "--every", str(a.every),
                     "--timeout", "400"], check=True)
 

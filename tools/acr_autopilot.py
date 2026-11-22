@@ -62,9 +62,10 @@ def main():
     ap.add_argument("--route-cell", default=None, help="umap path of the forward route cell")
     ap.add_argument("--shots", default="")
     ap.add_argument("--out", default="shots")
-    ap.add_argument("--max-speed", type=float, default=70.0, help="km/h")
-    ap.add_argument("--lat-acc", type=float, default=4.0, help="m/s^2 allowed in corners")
-    ap.add_argument("--steer-gain", type=float, default=1.6)
+    ap.add_argument("--max-speed", type=float, default=50.0, help="km/h")
+    ap.add_argument("--lat-acc", type=float, default=2.5, help="m/s^2 allowed in corners")
+    ap.add_argument("--steer-gain", type=float, default=1.1)
+    ap.add_argument("--build", default=None, help="build dir: shots every 600 m + around each join, sheet at the end")
     ap.add_argument("--steer-sign", type=float, default=1.0)
     ap.add_argument("--stop-at", type=float, default=1e9)
     a = ap.parse_args()
@@ -81,6 +82,15 @@ def main():
     hd = np.unwrap(np.arctan2(np.gradient(R[:, 1]), np.gradient(R[:, 0])))
     curv = np.abs(np.gradient(hd)) / 2.0                       # 1/m on the 2 m resample
     shots = sorted(float(x) for x in a.shots.split(",") if x)
+    if a.build:
+        import json
+        marks = list(np.arange(300, S[-1] - 100, 600))
+        lay = os.path.join(a.build, "layout.json")
+        if os.path.exists(lay):
+            for p in json.load(open(lay))["pieces"][1:]:
+                marks += [p["s_start"] - 25, p["s_start"] + 25]
+        shots = sorted(set(round(m) for m in marks if 0 < m < S[-1] - 20))
+    taken = []
     read = telemetry()
     pad = vg.VX360Gamepad()
     time.sleep(3)
@@ -112,6 +122,19 @@ def main():
     time.sleep(4)
     last_log, last_move_t, last_pos = -1e9, time.time(), None
     i_prev = None
+    err_prev, t_prev = 0.0, time.time()
+    off_since, recoveries, started = None, 0, False
+
+    def recover(err_side):
+        """Game respawn (hold Y puts the car back on the road, upright, in neutral), then 1st gear."""
+        apply(0, 0, 0); time.sleep(0.5)
+        pad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y); pad.update(); time.sleep(4)
+        pad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y); pad.update(); time.sleep(3)
+        for _ in range(6):
+            if gear() >= 2:
+                break
+            tap(UP); time.sleep(0.4)
+
     while True:
         pos, v, vel, head = read()
         d = np.linalg.norm(R[:, :2] - pos[:2], axis=1)
@@ -128,11 +151,24 @@ def main():
         j = min(int(np.searchsorted(S, s + look)), len(R) - 1)
         tgt = R[j, :2] - pos[:2]
         err = (math.atan2(tgt[1], tgt[0]) - yaw + math.pi) % (2 * math.pi) - math.pi
-        steer = a.steer_sign * a.steer_gain * err
+        started = started or v > 5                                   # countdown over, car rolling
+        now_t = time.time()
+        derr = (err - err_prev) / max(now_t - t_prev, 1e-3)
+        err_prev, t_prev = err, now_t
+        steer = a.steer_sign * (a.steer_gain * err + 0.15 * derr)
         k_ahead = curv[i: min(len(R), i + int((20 + 2.5 * v) / 2))].max(initial=1e-4)
         v_tgt = min(a.max_speed / 3.6, math.sqrt(a.lat_acc / max(k_ahead, 1e-4)))
-        gas = 1.0 if v < v_tgt - 1 else 0.25 if v < v_tgt + 1 else 0.0
+        gas = float(np.clip(0.35 + 0.12 * (v_tgt - v), 0.0, 0.85))
         brake = min(1.0, (v - v_tgt) / 5) if v > v_tgt + 2 else 0.0
+        # recovery: far off the line or not moving for a while -> back out and retry
+        bad = started and (off > 12 or (time.time() - last_move_t > 5))
+        off_since = (off_since or time.time()) if bad else None
+        if off_since and time.time() - off_since > 3 and recoveries < 15:
+            recoveries += 1
+            print(f"recovering ({recoveries}) at s={s:.0f} m, off={off:.1f} m", flush=True)
+            recover(err)
+            off_since, last_move_t = None, time.time()
+            continue
         apply(steer, gas, brake)
         now = time.time()
         if now - last_shift > 1.0:                                   # simple automatic gearbox
@@ -144,7 +180,9 @@ def main():
             elif g < 2:
                 tap(UP); last_shift = now
         if shots and s >= shots[0]:
-            shot(os.path.join(a.out, f"at{int(shots[0])}.jpg"))
+            p_ = os.path.join(a.out, f"at{int(shots[0]):05d}.jpg")
+            shot(p_, 480)
+            taken.append((f"{int(shots[0])} m (off {off:.0f} m)", p_))
             print(f"shot at {s:.0f} m", flush=True)
             shots.pop(0)
         if s - last_log >= 100:
@@ -153,7 +191,7 @@ def main():
             last_log = s
         if last_pos is None or np.linalg.norm(pos[:2] - last_pos) > 3:
             last_pos, last_move_t = pos[:2].copy(), time.time()
-        if time.time() - last_move_t > 12:
+        if time.time() - last_move_t > 12 and recoveries >= 15:
             print(f"STUCK at s={s:.0f} m (offset {off:.1f} m)"); break
         if pos[2] < R[i, 2] - 15:
             print(f"FELL at s={s:.0f} m: car height {pos[2]:.1f}, road {R[i,2]:.1f}"); break
@@ -162,7 +200,19 @@ def main():
         time.sleep(0.05)
     apply(0, 0, 1)
     time.sleep(2)
-    shot(os.path.join(a.out, "end.jpg"))
+    endp = os.path.join(a.out, "end.jpg")
+    shot(endp, 480)
+    taken.append(("end", endp))
+    from PIL import Image, ImageDraw
+    cols, w, h = 3, 480, 270
+    sheet = Image.new("RGB", (cols * w, ((len(taken) + cols - 1) // cols) * h), "black")
+    for k, (lab, p_) in enumerate(taken):
+        im = Image.open(p_).resize((w, h))
+        ImageDraw.Draw(im).text((8, 8), lab, fill=(255, 255, 0))
+        sheet.paste(im, ((k % cols) * w, (k // cols) * h))
+    sp = os.path.join(a.out, "sheet.jpg")
+    sheet.save(sp, quality=70)
+    print("sheet", sp, flush=True)
 
 
 if __name__ == "__main__":
