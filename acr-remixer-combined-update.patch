@@ -1,0 +1,2207 @@
+diff --git a/.github/workflows/build-zlib-patched.yml b/.github/workflows/build-zlib-patched.yml
+index 46a0299..fe487ab 100644
+--- a/.github/workflows/build-zlib-patched.yml
++++ b/.github/workflows/build-zlib-patched.yml
+@@ -1,4 +1,4 @@
+-name: Build patched ACR Remixer for Windows
++name: Build ACR Remixer - Geometry Foundation
+ 
+ on:
+   workflow_dispatch:
+@@ -20,8 +20,11 @@ jobs:
+           python-version: '3.14'
+           cache: pip
+ 
+-      - name: Install backend dependencies and PyInstaller
+-        run: python -m pip install -r requirements.txt pyinstaller
++      - name: Install backend dependencies, PyInstaller and tests
++        run: python -m pip install -r requirements.txt pyinstaller pytest
++
++      - name: Run Python regression tests (geometry, collision and serialization)
++        run: python -m pytest -q tests
+ 
+       - name: Set up Rust
+         uses: dtolnay/rust-toolchain@stable
+@@ -40,15 +43,19 @@ jobs:
+         run: python -m PyInstaller packaging/backend.spec --distpath packaging/dist --workpath packaging/build --noconfirm
+ 
+       - name: Smoke-test the frozen backend
+-        run: packaging/dist/stagegen-backend.exe --help
++        run: |
++          packaging/dist/stagegen-backend.exe --help
++          packaging/dist/stagegen-backend.exe inspect-collision --help
+ 
+       - name: Build the Windows GUI executable
+         run: cargo build --release --manifest-path gui/Cargo.toml
+ 
+-      - name: Upload acr-remixer.exe
++      - name: Upload Windows GUI and diagnostic backend
+         uses: actions/upload-artifact@v4
+         with:
+           name: acr-remixer-windows-exe
+-          path: gui/target/release/acr-remixer.exe
++          path: |
++            gui/target/release/acr-remixer.exe
++            packaging/dist/stagegen-backend.exe
+           if-no-files-found: error
+           retention-days: 14
+diff --git a/.gitignore b/.gitignore
+index 9d2a4ce..288fc98 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,5 +1,7 @@
+ __pycache__/
+ *.pyc
+ out/
+-
+-out*/
++
++out*/
++
++.pytest_cache/
+diff --git a/README.md b/README.md
+index 5c9219d..8f75c71 100644
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,4 @@
+-﻿# ACR Remixer
++# ACR Remixer
+ 
+ [![Download](https://img.shields.io/badge/download-newest%20build-2ea44f?logo=github)](../../releases)
+ [![Latest release](https://img.shields.io/github/v/release/vale981/acr-remixer?label=release)](../../releases/latest)
+@@ -212,3 +212,45 @@ is not under the MIT license. Every file's license is recorded following the
+ keep their own licenses, e.g. [oozextract](https://crates.io/crates/oozextract)
+ (MIT) in `oodle_shim/`, [egui](https://github.com/emilk/egui) (MIT/Apache-2.0),
+ numpy and scipy (BSD).
++
++
++## Collision inspection (read-only)
++
++The bundled backend can export a geometry/collision inventory for one stage or
++all discoverable World Partition stages. It writes one JSON report and one CSV
++(mesh-level statistics) per stage. The report includes baked primitive-shape entry counts/material references,
++collision groups, triangle validity, mesh bounds, and a bounded nearest-triangle
++road-to-collision coverage metric. Optional OBJ exports are available for road
++and terrain collision meshes.
++
++```powershell
++.\stagegen-backend.exe inspect-collision --level WalesS4HafrenSouth `
++  --paks "D:\SteamLibrary\steamapps\common\Assetto Corsa Rally\acr\Content\Paks" `
++  --out "$env:USERPROFILE\Desktop\ACR-Collision-Inspection"
++```
++
++Use `--all` instead of `--level WalesS4HafrenSouth` to inspect every discoverable
++original level. To inspect an installed custom stage, add `--include-stagegen`,
++for example `--level SGQ2195E225HafrenSouth --include-stagegen`. Add `--obj` to
++export road and terrain collision meshes for Blender; those files can be large.
++
++```powershell
++.\stagegen-backend.exe inspect-collision --level SGQ2195E225HafrenSouth --include-stagegen `
++  --paks "D:\SteamLibrary\steamapps\common\Assetto Corsa Rally\acr\Content\Paks" `
++  --out "$env:USERPROFILE\Desktop\ACR-Collision-Inspection" --obj
++```
++
++The road-coverage metric calculates point-to-triangle distance for a bounded set
++of nearby triangles, not an exact Unreal physics raycast. Primitive shape
++payloads are inventoried but are not yet semantically decoded. See
++[Collision Inspector notes](docs/collision-inspector.md).
++
++## Road-combination geometry (experimental)
++
++The current geometry-foundation update decodes Unreal spline interpolation more
++faithfully, removes the unrestricted manual-join fallback, rejects poorly
++conditioned tile-boundary crossings, and checks the join-shear grade against the
++transformed horizontal distance. See [Road-combination geometry decisions](docs/geometry-road-combination.md)
++for the mathematics, tests and items deliberately deferred pending real-stage
++measurements. The configured join thresholds remain provisional until validated
++against original ACR stages and in-game driving.
+diff --git a/docs/collision-inspector.md b/docs/collision-inspector.md
+new file mode 100644
+index 0000000..868a105
+--- /dev/null
++++ b/docs/collision-inspector.md
+@@ -0,0 +1,100 @@
++# Collision Inspector and crash-isolation notes
++
++## Why this is being added
++
++The current ACR Remixer rewrites the baked triangle meshes in
++`DA_<Location>BakedData`: it clips and relocates the FBakedMesh triangle
++collision with the same tile ownership rules used for the road/terrain mesh.
++The current writer preserves the baked primitive-shape array (box, sphere,
++capsule) and its shape-index group list byte-for-byte. Those primitive shapes
++are not transformed by the current build path. This is a concrete compatibility
++risk when source actors are relocated, but it is not yet proven to be the cause
++of the user's post-race crash.
++
++## Read-only inspection
++
++Run:
++
++```powershell
++.\stagegen-backend.exe inspect-collision --level WalesS4HafrenSouth `
++  --paks "D:\SteamLibrary\steamapps\common\Assetto Corsa Rally\acr\Content\Paks" `
++  --out "$env:USERPROFILE\Desktop\ACR-Collision-Inspection"
++```
++
++Or use `--all` instead of `--level ...` for every discoverable original stage.
++To inspect installed custom outputs, add `--include-stagegen`; this opt-in lets
++the inspector read `~mods/*_Stagegen_*` containers, which normal source loading
++intentionally excludes:
++
++```powershell
++.\stagegen-backend.exe inspect-collision --level SGQ2195E225HafrenSouth --include-stagegen `
++  --paks "D:\SteamLibrary\steamapps\common\Assetto Corsa Rally\acr\Content\Paks" `
++  --out "$env:USERPROFILE\Desktop\ACR-Collision-Inspection"
++```
++
++The tool writes:
++
++- `<Stage>_collision.json`: route, baked-mesh, primitive-shape and group summary.
++- `<Stage>_collision_meshes.csv`: one row per baked collision mesh, with actor,
++  material reference, collision group, vertex/triangle counts, bounds, nearest
++  route-centreline distances, and triangle validity statistics.
++- `collision_inspection_index.json`: inspected stages and any per-stage errors.
++- Optional `<Stage>_road_collision.obj` and `<Stage>_terrain_collision.obj`
++  when `--obj` is supplied.
++
++The road-to-collision metric resamples the centreline at 10 m intervals,
++selects the 64 nearest road-triangle centroids in XY, then computes exact 3D
++point-to-triangle distances for those candidate faces. This is more precise
++than centroid-only distance, but remains a bounded candidate search rather than
++an Unreal physics raycast. A high coverage score does not certify runtime
++physics behaviour.
++Primitive shape component fields are only inventoried (shape counts, material,
++owner path, collision-group mapping); their field payloads have not yet been
++reverse-engineered semantically.
++
++## Diagnostic build: remove primitive shapes
++
++The GUI contains an **Diagnostic (experimental) → Remove primitive collision
++shapes** option. It removes the baked box/sphere/capsule shape array and clears
++only its corresponding shape-index group list. It preserves triangle collision
++meshes and their mesh-group index list. This intentionally removes some prop
++collisions, so it is a test build only, not a normal stage setting.
++
++Use it as a controlled test:
++
++1. Rebuild the same manual sequence with all vegetation disabled, but leave
++   primitive shapes enabled. Test entering, driving, finishing and exiting.
++2. If it still crashes, rebuild the same sequence with all vegetation still
++   disabled and **Remove primitive collision shapes** enabled. Test again.
++3. If step 1 crashes and step 2 does not, primitive shape data becomes the
++   leading suspect. If both crash, investigate triangle collision, terrain
++   height blending, actor transforms, and route/replay data next.
++4. If step 1 works, re-enable one vegetation category at a time to isolate
++   forest, grass/rocks, or foliage relocation.
++
++The test mode should not be distributed as a playable production stage because
++some props will have no primitive collision.
++
++## Validation currently performed
++
++The baked-data validator checks that:
++
++- the BakedDataContainer export parses to its exact end;
++- mesh index groups cover all collision meshes;
++- every mesh's index count is triangular;
++- mesh vertices are finite and triangle indices are in range;
++- primitive shape group indices do not point beyond the shape array.
++
++The generation pipeline also retains its existing route drivability, road-step,
++seam-height and terrain checks. A passing report is a data-integrity check, not
++a substitute for in-game testing.
++
++## Still required to implement full shape relocation
++
++The shape entry structs contain box/sphere/capsule fields with opaque byte
++schemas in `stagegen/build/writers.py`. Before transforming those shapes, each
++field must be decoded into its actual transform, dimensions, material and
++flags, then re-serialized and the shape-group index list rebuilt for each
++repeated/moved source actor. Guessing field meanings risks producing invalid
++Unreal physics data; the inspector therefore preserves raw field layouts until
++we can compare it against representative source assets from multiple stages.
+diff --git a/docs/geometry-road-combination.md b/docs/geometry-road-combination.md
+new file mode 100644
+index 0000000..8f6629b
+--- /dev/null
++++ b/docs/geometry-road-combination.md
+@@ -0,0 +1,75 @@
++# Road-combination geometry: implementation decisions
++
++This document records the first geometry-focused implementation pass. It does
++not claim that all ACR stages are verified; no original game PAKs or generated
++stage reports were available in this source-only review.
++
++## Implemented in this pass
++
++- Decode `FInterpCurveVector` input keys, interpolation modes, loop state and
++  loop-key offset.
++- Evaluate linear, constant and cubic interpolation using Unreal's key-interval
++  tangent scaling. Cubic segments are converted to Bezier form and adaptively
++  subdivided with a conservative control-polygon length bound and a flatness
++  tolerance.
++- Reject discontinuous constant segments rather than connecting them with an
++  invented diagonal road segment.
++- Reject manual joins that exceed the configured kink, grade or width limits;
++  remove the old 180-degree placement fallback.
++- Reject nearly parallel boundary crossings instead of clamping their small
++  normal component and producing unbounded longitudinal deformation.
++- Calculate vertical shear so the resulting grade is matched per transformed
++  horizontal arclength, accounting for the horizontal speed change introduced
++  by the lateral shear.
++- Add regression tests for spline semantics, join derivatives and manual
++  sequence rejection.
++
++## Join shear mathematics
++
++Let `e` be the tile-boundary tangent and `n` its selected normal. A road unit
++heading at angle `a` is `u = sin(a)e + cos(a)n`. The existing compact-support
++profile is `g(d) = d(1-d/D)^2` for `0 <= d < D`, and zero after `D`.
++Its maximum is `4D/27`; it has zero displacement at the boundary and zero
++first derivative at the outer support edge.
++
++The boundary-parallel shear coefficient changes the tangent angle from the
++source angle to the mean angle `a_m`. This also changes horizontal speed:
++`|dXY_new/ds_source| = cos(a_source)/cos(a_m)`. Therefore the vertical shear
++must match grade after this speed change. With source grades `q_in` and
++`q_out`, and `q_m = (q_in + q_out)/2`, the implemented coefficients are:
++
++- next side: `Az_out = q_m/cos(a_m) - q_out/cos(a_out)`
++- previous side: `Az_in = q_in/cos(a_in) - q_m/cos(a_m)`
++
++This makes both transformed one-sided grades equal to `q_m` at the join when
++grade is measured as `dz / horizontal_distance`. Property tests exercise
++random crossing orientations and grades.
++
++The current displacement profile is C1 but not C2 at its outer support edge.
++A higher-order polynomial is not substituted automatically: candidate profiles
++can introduce stronger counter-shear or other undesirable derivatives and must
++be compared against source-stage geometry before selection.
++
++## Deliberately deferred
++
++The following require representative original/generated ACR data or in-game
++validation before safe implementation:
++
++- Numeric maximum deformation budgets for vertical and boundary-parallel shifts.
++- Matching left/right road border splines to centerline stations and preserving
++  crossfall/banking in generated route splines.
++- Separating terrain-only seam blending from road meshes and road collision.
++  The current source has path-name classifications, but their correctness and
++  relationship to ACR's baked collision meshes need validation on real stages.
++- Road-wide collision sampling and surface classification using actual
++  material/owner mappings.
++- Tree/rock/barrier broad-phase and narrow-phase clearance using real
++  BodySetup/AggGeom and instance transforms.
++- Grid-corner supercover traversal and stage-specific grid calibration.
++
++No vertical- or boundary-parallel-deformation budget has been invented in
++this pass. The boundary-normal projection floor (currently 0.2, configurable)
++is a provisional numerical guard that caps the inverse projection factor at 5;
++it has not been calibrated against ACR stage availability. The existing join
++limits also remain provisional and should be calibrated against Hafren South
++and Elatia source geometry and measured in-game results.
+diff --git a/gui/src/main.rs b/gui/src/main.rs
+index e88ff1d..76a86ce 100644
+--- a/gui/src/main.rs
++++ b/gui/src/main.rs
+@@ -75,6 +75,8 @@ struct Prefs {
+     forest: bool,
+     grass: bool,
+     foliage: bool,
++    /// Diagnostic only: remove baked primitive shapes while retaining triangle collision.
++    debug_no_baked_shapes: bool,
+     install: bool,
+     launch: bool,
+     /// development: run `python -m stagegen.cli` from backend_dir instead of the embedded backend
+@@ -109,6 +111,7 @@ impl Default for Prefs {
+             forest: true,
+             grass: true,
+             foliage: true,
++            debug_no_baked_shapes: false,
+             install: true,
+             launch: false,
+             use_python: BACKEND.is_none(),
+@@ -142,6 +145,7 @@ fn prefs_with_params(base: &Prefs, params: &serde_json::Value) -> Prefs {
+     p.forest = params["forest"].as_bool().unwrap_or(true);
+     p.grass = params["grass"].as_bool().unwrap_or(true);
+     p.foliage = params["foliage"].as_bool().unwrap_or(true);
++    p.debug_no_baked_shapes = params["debug_no_baked_shapes"].as_bool().unwrap_or(false);
+     p
+ }
+ 
+@@ -522,6 +526,7 @@ impl App {
+         if !p.forest { args.push("--no-forest".into()); }
+         if !p.grass { args.push("--no-grass".into()); }
+         if !p.foliage { args.push("--no-foliage".into()); }
++        if p.debug_no_baked_shapes { args.push("--debug-no-baked-shapes".into()); }
+         // every stage of a batch is installed (each gets its own menu entry); ACR starts after the last
+         if p.install { args.push("--install".into()); }
+         if last && p.install && p.launch { args.push("--launch".into()); }
+@@ -903,6 +908,10 @@ impl eframe::App for App {
+                     ui.checkbox(&mut p.grass, "Grass & rocks");
+                     ui.checkbox(&mut p.foliage, "Ground grass");
+                 });
++                egui::CollapsingHeader::new("Diagnostic (experimental)").show(ui, |ui| {
++                    ui.checkbox(&mut p.debug_no_baked_shapes, "Remove primitive collision shapes")
++                        .on_hover_text("TEST ONLY: removes box/sphere/capsule entries from baked collision while retaining triangle meshes. Some props may lose collision.");
++                });
+                 ui.checkbox(&mut p.install, "Install into the game (closes ACR)");
+                 ui.add_enabled(p.install, egui::Checkbox::new(&mut p.launch, "Start ACR afterwards"));
+                 block_changed = ui.checkbox(&mut p.block_online, "Block ACR online while a stage is installed")
+diff --git a/stagegen/build/wp.py b/stagegen/build/wp.py
+index 44bd164..52d23cc 100644
+--- a/stagegen/build/wp.py
++++ b/stagegen/build/wp.py
+@@ -96,6 +96,7 @@ class WPConfig:
+     debug_skip_kinds: tuple = ()         # test builds: actor kinds left unmoved
+     debug_no_backdrop: bool = False     # test builds: hide the coarse backdrop terrain entirely
+     debug_no_clip: bool = False         # test builds: keep tile/backdrop meshes unclipped
++    debug_no_baked_shapes: bool = False # diagnostic: remove primitive shapes, retain triangle collision
+     debug_offset_zero: bool = False      # test builds: build on top of the original map (piece 0 stays put)
+     debug_offset: tuple | None = None    # test builds: explicit placement offset (m)
+ 
+@@ -496,6 +497,18 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
+     # that owns most of them, clipped to those stretches.
+     bpk = Package(fs.read(ws.baked))
+     bf = W.read_baked_full(bpk)
++    shape_info = W.inspect_baked_shapes(bpk, bf)
++    if cfg.debug_no_baked_shapes:
++        bf, removed_shapes = W.without_baked_shapes(bf)
++        rep.checks.append(
++            f"DIAGNOSTIC: removed {removed_shapes} baked primitive-shape entries "
++            f"({shape_info['primitive_counts']}); triangle collision meshes retained"
++        )
++    elif shape_info["entry_count"]:
++        rep.checks.append(
++            f"collision audit: {shape_info['entry_count']} primitive-shape entries "
++            f"({shape_info['primitive_counts']}) are preserved verbatim; their transforms are not rebuilt"
++        )
+     meshes = bf.meshes
+     tile_v = np.vstack([m.vertices[::4, [0, 2, 1]] for m in meshes
+                         if re.search(rb"Track\d{4}", m.soft_sub) and len(m.vertices)])
+diff --git a/stagegen/build/writers.py b/stagegen/build/writers.py
+index 57b6567..fd70d61 100644
+--- a/stagegen/build/writers.py
++++ b/stagegen/build/writers.py
+@@ -1,4 +1,4 @@
+-﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
++# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+ # SPDX-License-Identifier: MIT
+ 
+ """Serialisers for the three asset kinds a generated stage rewrites:
+@@ -200,7 +200,7 @@ class BakedFull:
+     covered: set = None        # mesh indices that list 0 references
+ 
+ 
+-def _skip_shapes(r: Reader):
++def _skip_shapes(r: Reader) -> int:
+     n = r.u32()
+     for _ in range(n):
+         for f in r.header():
+@@ -218,6 +218,125 @@ def _skip_shapes(r: Reader):
+                 n_ = r.i32(); r.p += n_
+             else:
+                 raise ValueError(f"unknown shape entry field {f}")
++    return n
++
++
++def _resolve_package_index(pk: Package, ref: int) -> str:
++    """Best-effort resolve an FPackageIndex from BakedData to a package/export name."""
++    if ref < 0:
++        i = -ref - 1
++        try:
++            return pk.imported_package_names()[i]
++        except (IndexError, ValueError):
++            return f"import[{i}]"
++    if ref > 0:
++        i = ref - 1
++        return pk.exports[i].name if i < len(pk.exports) else f"export[{i}]"
++    return "none"
++
++
++def inspect_baked_shapes(pk: Package, bf: BakedFull | None = None) -> dict:
++    """Describe primitive collision shapes and their collision-group references.
++
++    Shape component field payloads are deliberately reported as opaque sizes;
++    their exact semantics are not yet reverse-engineered and must not be guessed.
++    """
++    bf = bf or read_baked_full(pk)
++    r = Reader(bf.mid, 0)
++    n = r.u32()
++    entries = []
++    totals = {"box": 0, "sphere": 0, "capsule": 0}
++    layouts = {"box": [], "sphere": [], "capsule": []}
++    samples = {"box": [], "sphere": [], "capsule": []}
++    names = {0: "box", 1: "sphere", 2: "capsule"}
++    for index in range(n):
++        item = {"index": index, "counts": {"box": 0, "sphere": 0, "capsule": 0},
++                "material_ref": 0, "material": "none", "package": "", "asset": "", "subobject": ""}
++        for f in r.header():
++            if f in (0, 1, 2):
++                count = r.u32()
++                item["counts"][names[f]] = count
++                totals[names[f]] += count
++                schema = SHAPE_SCHEMAS[f]
++                for _ in range(count):
++                    element_fields = {}
++                    sample = {}
++                    for g in r.header():
++                        if g not in schema:
++                            raise ValueError(f"unknown collision shape field {f}.{g}")
++                        size = schema[g]
++                        raw = r.raw(size)
++                        if len(raw) != size:
++                            raise ValueError(f"collision shape field {f}.{g} overruns baked data")
++                        element_fields[str(g)] = size
++                        if len(samples[names[f]]) < 3:
++                            sample[str(g)] = raw.hex()
++                    signature = tuple(sorted(element_fields.items()))
++                    if signature not in layouts[names[f]]:
++                        layouts[names[f]].append(signature)
++                    if sample and len(samples[names[f]]) < 3:
++                        samples[names[f]].append(sample)
++            elif f == 3:
++                item["material_ref"] = r.i32()
++                item["material"] = _resolve_package_index(pk, item["material_ref"])
++            elif f == 4:
++                item["package"] = r.fname(pk.names)
++                item["asset"] = r.fname(pk.names)
++                item["subobject"] = r.fstring()
++            else:
++                raise ValueError(f"unknown shape entry field {f}")
++        entries.append(item)
++    empty_count = r.u32() if r.p + 4 <= len(r.d) else -1
++    if empty_count != 0:
++        raise ValueError(f"BakedDataContainer field 2 expected empty array, got {empty_count}")
++    if r.p != len(r.d):
++        raise ValueError(f"shape inventory consumed {r.p} of {len(r.d)} mid bytes")
++
++    # Top-level index list 2 maps primitive-shape indices to collision groups.
++    rr = Reader(bf.rest, 0)
++    _read_list(rr)  # list 1 is preserved but unrelated to primitive shape indices
++    list2 = _read_list(rr)
++    shape_groups: dict[int, list[int]] = {}
++    for key, _z, _hdr, ranges in list2:
++        for start, count in ranges:
++            for i in range(start, start + count):
++                shape_groups.setdefault(i, []).append(key)
++    for item in entries:
++        item["groups"] = shape_groups.get(item["index"], [])
++    return {
++        "entry_count": n,
++        "primitive_counts": totals,
++        "primitive_field_layouts": {k: [dict(v) for v in values] for k, values in layouts.items()},
++        "primitive_raw_samples_hex": samples,
++        "group_count": len(list2),
++        "group_keys": [g[0] for g in list2],
++        "entries": entries,
++    }
++
++
++def without_baked_shapes(bf: BakedFull) -> tuple[BakedFull, int]:
++    """Return a diagnostic BakedFull with primitive shapes and list-2 refs removed.
++
++    Triangle collision meshes and list-0 mesh-group membership remain intact.
++    This is only for controlled diagnosis; it removes primitive collision used
++    by some props and should not be treated as a normal production setting.
++    """
++    r = Reader(bf.mid, 0)
++    n_shapes = _skip_shapes(r)
++    if r.u32() != 0 or r.p != len(bf.mid):
++        raise ValueError("unexpected BakedDataContainer shape-array suffix")
++
++    rr = Reader(bf.rest, 0)
++    _read_list(rr)
++    list1_end = rr.p
++    _read_list(rr)
++    if rr.p != len(bf.rest) - 4 or bf.rest[-4:] != bytes(4):
++        raise ValueError("unexpected BakedDataContainer index-list suffix")
++    # Preserve list 1 and the trailer, but remove list 2's shape-index groups.
++    rest = bf.rest[:list1_end] + struct.pack("<i", 0) + bf.rest[-4:]
++    stripped = BakedFull(bf.top, bf.transform_bytes, bf.meshes, struct.pack("<II", 0, 0),
++                         bf.list0_hdr, rest, bf.covered)
++    return stripped, n_shapes
+ 
+ 
+ def _read_list(r: Reader):
+@@ -294,7 +413,27 @@ def check_baked(pk: Package) -> str:
+     n = len(bf.meshes)
+     if bf.covered != set(range(n)):
+         raise ValueError(f"mesh index list covers {len(bf.covered)} indices, {n} meshes")
+-    return f"{n} meshes all grouped {[k for k, _, _ in bf.list0_hdr]}, lists {len(l1)}/{len(l2)}, exact size"
++    total_triangles = 0
++    for mi, mesh in enumerate(bf.meshes):
++        if mesh.indices.size % 3:
++            raise ValueError(f"collision mesh {mi} has {mesh.indices.size} indices (not divisible by 3)")
++        if not np.isfinite(mesh.vertices).all():
++            raise ValueError(f"collision mesh {mi} has NaN/Inf vertex coordinates")
++        if mesh.indices.size and int(mesh.indices.max()) >= len(mesh.vertices):
++            raise ValueError(f"collision mesh {mi} has an out-of-range vertex index")
++        total_triangles += mesh.indices.size // 3
++    shape_reader = Reader(bf.mid, 0)
++    n_shapes = _skip_shapes(shape_reader)
++    if shape_reader.u32() != 0 or shape_reader.p != len(bf.mid):
++        raise ValueError("invalid BakedDataContainer shape-array suffix")
++    shape_refs = {i for _key, _z, _hdr, ranges in l2 for a, b in ranges for i in range(a, a + b)}
++    invalid_shape_refs = sorted(i for i in shape_refs if i < 0 or i >= n_shapes)
++    if invalid_shape_refs:
++        raise ValueError(f"shape index list references {len(invalid_shape_refs)} out-of-range entries "
++                         f"(shape count {n_shapes}; first {invalid_shape_refs[:8]})")
++    return (f"{n} meshes all grouped {[k for k, _, _ in bf.list0_hdr]}, "
++            f"lists {len(l1)}/{len(l2)}, {n_shapes} primitive shape entries "
++            f"({len(shape_refs)} indexed), {total_triangles} triangles finite/in-range, exact size")
+ 
+ 
+ def _runs(idx: list[int]) -> list[tuple[int, int]]:
+diff --git a/stagegen/cli.py b/stagegen/cli.py
+index bc2f208..8ed2ce6 100644
+--- a/stagegen/cli.py
++++ b/stagegen/cli.py
+@@ -1,4 +1,4 @@
+-﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
++# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+ # SPDX-License-Identifier: MIT
+ 
+ """acr-stagegen command line.
+@@ -44,6 +44,26 @@ def _list(a) -> int:
+     return 0
+ 
+ 
++def _inspect_collision(a) -> int:
++    from .extract.iostore import GameFS
++    from .extract.real import DEFAULT_PAKS, find_levels
++    from .inspect_collision import inspect_levels
++
++    paks = os.path.normpath(a.paks or DEFAULT_PAKS)
++    # Stagegen output is excluded from normal source loading to prevent the
++    # generator feeding its own generated stages back into its source pool.
++    # The inspector opts in explicitly so users can inspect installed outputs.
++    fs = GameFS(paks, include_stagegen=a.include_stagegen)
++    if a.all:
++        levels = [os.path.basename(p)[:-5] for p in find_levels(fs)]
++    else:
++        levels = [a.level]
++    os.makedirs(a.out, exist_ok=True)
++    result = inspect_levels(fs, levels, a.out, a.corridor, a.obj)
++    print(f"collision inspection finished: {result['report_count']} stage(s), {len(result['errors'])} error(s)")
++    return 0 if result["report_count"] else 1
++
++
+ # Single-level builds: shorter segments so a 6-7 km stage still recombines,
+ # with the opening/closing segments anchored to the real start and finish.
+ BUILD_CUT = CutConfig(max_curvature=1 / 90, max_grade_change=0.05, window_m=16.0,
+@@ -183,7 +203,9 @@ def _build_wp(a, paks: str) -> int:
+     import ast
+     import dataclasses
+     from .build.wp import WPConfig
+-    cfg = WPConfig(debug_spawn_s=a.spawn_at, debug_no_clip=a.no_clip, debug_offset_zero=a.offset_zero,
++    cfg = WPConfig(debug_spawn_s=a.spawn_at, debug_no_clip=a.no_clip,
++                   debug_no_baked_shapes=getattr(a, "debug_no_baked_shapes", False),
++                   debug_offset_zero=a.offset_zero,
+                    debug_offset=None if a.offset is None else tuple(float(v) for v in a.offset.split(',')))
+     if not getattr(a, "override", False):
+         # its own level and menu entry next to the original stage
+@@ -195,7 +217,8 @@ def _build_wp(a, paks: str) -> int:
+         cfg.build_params = {"level": a.level, "length": a.length, "seed": a.seed,
+                             "max_uses": getattr(a, "max_uses", 1), "sequence": getattr(a, "sequence", None) or "",
+                             "forest": not getattr(a, "no_forest", False), "grass": not getattr(a, "no_grass", False),
+-                            "foliage": not getattr(a, "no_foliage", False)}
++                            "foliage": not getattr(a, "no_foliage", False),
++                            "debug_no_baked_shapes": bool(getattr(a, "debug_no_baked_shapes", False))}
+     if getattr(a, "no_forest", False):
+         cfg.forest = "hide"
+     if getattr(a, "no_grass", False):
+@@ -391,6 +414,16 @@ def main(argv=None):
+     g.add_argument("--out", default="out")
+     ls = sub.add_parser("list", help="list stage levels found in the install")
+     ls.add_argument("--paks")
++    ci = sub.add_parser("inspect-collision", help="export collision/road geometry inventory for one or all stages")
++    ci_src = ci.add_mutually_exclusive_group(required=True)
++    ci_src.add_argument("--level", help="stage level, e.g. WalesS4HafrenSouth")
++    ci_src.add_argument("--all", action="store_true", help="inspect every discoverable level")
++    ci.add_argument("--paks", help="path to acr/Content/Paks")
++    ci.add_argument("--include-stagegen", action="store_true",
++                    help="also inspect installed ACR Remixer *_Stagegen_* containers")
++    ci.add_argument("--out", default="collision-inspection", help="report output directory")
++    ci.add_argument("--corridor", type=float, default=30.0, help="route proximity corridor in metres")
++    ci.add_argument("--obj", action="store_true", help="also export road/terrain collision meshes as OBJ (can be large)")
+     b = sub.add_parser("build", help="generate a stage from one level and build an installable mod container")
+     b.add_argument("--level", default="WrcgEsSS1", help="stage level to recombine and replace")
+     b.add_argument("--paks")
+@@ -411,6 +444,8 @@ def main(argv=None):
+     b.add_argument("--install", action="store_true", help="install into ~mods after building (closes ACR if running)")
+     b.add_argument("--launch", action="store_true", help="install and start ACR through Steam")
+     b.add_argument("--no-clip", action="store_true", help="test builds: leave track meshes unclipped")
++    b.add_argument("--debug-no-baked-shapes", action="store_true",
++                   help="diagnostic only: remove primitive collision shapes but retain triangle collision")
+     b.add_argument("--offset-zero", action="store_true", help="test builds: build on top of the original map")
+     b.add_argument("--offset", default=None, help="test builds: placement offset x,y,z in metres")
+     for kind, what in (("forest", "forest trees"), ("grass", "grass, branches and rocks"),
+@@ -445,6 +480,8 @@ def main(argv=None):
+ 
+     if a.cmd == "list":
+         return _list(a)
++    if a.cmd == "inspect-collision":
++        return _inspect_collision(a)
+     if a.cmd == "segments":
+         return _segments(a)
+     if a.cmd == "build":
+diff --git a/stagegen/extract/bakeddata.py b/stagegen/extract/bakeddata.py
+index 7336a85..fcf4102 100644
+--- a/stagegen/extract/bakeddata.py
++++ b/stagegen/extract/bakeddata.py
+@@ -70,9 +70,17 @@ def _array(r: Reader, dtype, width=1):
+ 
+ 
+ def _material_name(pk: Package, idx: int) -> str:
+-    # Imports are FPackageObjectIndex hashes; the name map lists material
+-    # names in import order, so keep the raw index as a fallback label.
+-    return f"import{-idx - 1}" if idx < 0 else f"export{idx - 1}" if idx > 0 else "none"
++    """Resolve the baked material FPackageIndex to its imported package name."""
++    if idx < 0:
++        i = -idx - 1
++        try:
++            return pk.imported_package_names()[i]
++        except (IndexError, ValueError):
++            return f"import[{i}]"
++    if idx > 0:
++        i = idx - 1
++        return pk.exports[i].name if i < len(pk.exports) else f"export[{i}]"
++    return "none"
+ 
+ 
+ def read_baked(pk: Package) -> list[BakedMesh]:
+diff --git a/stagegen/extract/iostore.py b/stagegen/extract/iostore.py
+index 3749b50..6364fcf 100644
+--- a/stagegen/extract/iostore.py
++++ b/stagegen/extract/iostore.py
+@@ -196,12 +196,17 @@ class Container:
+ class GameFS:
+     """All containers of an install, base game first, mods last (mods override)."""
+ 
+-    def __init__(self, paks_dir: str, include_mods: bool = False):
++    def __init__(self, paks_dir: str, include_mods: bool = False,
++                 include_stagegen: bool = False):
+         paths = sorted(glob.glob(os.path.join(paks_dir, "*.utoc")))
++        mod_paths = sorted(glob.glob(os.path.join(paks_dir, "~mods", "*.utoc")))
+         if include_mods:
+-            # never read our own generated containers back as source data
+-            paths += sorted(p for p in glob.glob(os.path.join(paks_dir, "~mods", "*.utoc"))
+-                            if "_Stagegen_" not in os.path.basename(p))
++            # Normal third-party/user mods, excluding our own generated outputs.
++            paths += [p for p in mod_paths if "_Stagegen_" not in os.path.basename(p)]
++        if include_stagegen:
++            # Explicit forensic opt-in: read Remixer outputs to compare them
++            # against the unmodified source stage. Never enabled by the builder.
++            paths += [p for p in mod_paths if "_Stagegen_" in os.path.basename(p)]
+         self.containers = [Container(p) for p in paths]
+         self.index: dict[str, tuple[Container, int]] = {}
+         self.by_chunk: dict[bytes, tuple[Container, int]] = {}
+diff --git a/stagegen/extract/splines.py b/stagegen/extract/splines.py
+index f124f35..1eefdf9 100644
+--- a/stagegen/extract/splines.py
++++ b/stagegen/extract/splines.py
+@@ -1,34 +1,52 @@
+ # SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+ # SPDX-License-Identifier: MIT
+ 
+-"""Read the route splines from a stage level (SplinesActor -> DMSplineComponent).
++"""Read and evaluate Unreal FInterpCurveVector data from cooked stage levels.
+ 
+-Each DMSplineComponent (CenterSpline, IdealSpline, Left/RightBorderSpline,
+-ContourSpline, ...) serialises SplineCurves first:
+-
+-    FSplineCurves [first value]
+-      [0] Position: FInterpCurveVector
+-            [0] Points: TArray<FInterpCurvePointVector>
+-                  [0] InVal float  [1] OutVal FVector(d)  [2] ArriveTangent
+-                  [3] LeaveTangent [4] InterpMode u8
+-
+-Coordinates are UE world space (cm, Z up). Component transforms of the
+-SplinesActor are identity in every level checked so far.
++Coordinates in the inspected ACR spline exports are UE world-space centimetres
++(X/Y horizontal, Z up). The containing spline component transforms have been
++observed to be identity in the levels examined so far; this must be verified for
++any new stage before assuming the values are world-space.
+ """
+ from __future__ import annotations
+ 
++from dataclasses import dataclass
++
+ import numpy as np
+ 
+ from .unversioned import Reader
+ from .zen import Package
+ 
+ 
++# EInterpCurveMode values in Unreal's Math/InterpCurvePoint.h.
++CIM_LINEAR = 0
++CIM_CURVE_AUTO = 1
++CIM_CONSTANT = 2
++CIM_CURVE_USER = 3
++CIM_CURVE_BREAK = 4
++CIM_CURVE_AUTO_CLAMPED = 5
++CIM_UNKNOWN = 6
++
++
++@dataclass(frozen=True)
++class SplineCurve:
++    """One serialized FInterpCurveVector, in its native input-key domain."""
++
++    input_keys: np.ndarray       # (N,), FInterpCurvePoint::InVal
++    positions: np.ndarray        # (N,3), FVector OutVal (cm)
++    arrive_tangents: np.ndarray  # (N,3), FVector (per input-key unit)
++    leave_tangents: np.ndarray   # (N,3), FVector (per input-key unit)
++    interp_modes: np.ndarray     # (N,), EInterpCurveMode byte
++    is_looped: bool = False
++    loop_key_offset: float = 0.0
++
++
+ def _vec(r: Reader):
+     return (r.f64(), r.f64(), r.f64())
+ 
+ 
+-def read_spline_points(pk: Package, export_name: str):
+-    """Return (inval[N], pos[N,3], arrive[N,3], leave[N,3]) in UE cm."""
++def read_spline_curve(pk: Package, export_name: str) -> SplineCurve:
++    """Decode the Position FInterpCurveVector of a DMSplineComponent export."""
+     e = next(x for x in pk.exports if x.name == export_name)
+     r = Reader(pk.d, e.data_offset)
+     top = r.header()
+@@ -37,58 +55,220 @@ def read_spline_points(pk: Package, export_name: str):
+         top = top[1:]
+     if not top or top[0] != 2:
+         raise ValueError(f"no SplineCurves in {export_name}: {top}")
++
+     curves = r.header()          # FSplineCurves
+     if not curves or curves[0] != 0:
+         raise ValueError(f"no Position curve in {export_name}: {curves}")
+-    pos_curve = r.header()       # FInterpCurveVector
+-    if not pos_curve or pos_curve[0] != 0:
+-        return np.zeros(0), np.zeros((0, 3)), np.zeros((0, 3)), np.zeros((0, 3))
++
++    curve_fields = r.header()    # FInterpCurveVector: Points, bIsLooped, LoopKeyOffset
++    if not curve_fields or curve_fields[0] != 0:
++        return SplineCurve(np.zeros(0), np.zeros((0, 3)), np.zeros((0, 3)),
++                           np.zeros((0, 3)), np.zeros(0, dtype=np.uint8))
++
+     n = r.u32()
+-    inval = np.zeros(n)
+-    P = np.zeros((n, 3)); A = np.zeros((n, 3)); L = np.zeros((n, 3))
++    inval = np.zeros(n, dtype=np.float64)
++    positions = np.zeros((n, 3), dtype=np.float64)
++    arrive = np.zeros((n, 3), dtype=np.float64)
++    leave = np.zeros((n, 3), dtype=np.float64)
++    # The two-argument FInterpCurvePoint constructor defaults to CIM_Linear.
++    modes = np.full(n, CIM_LINEAR, dtype=np.uint8)
+     for k in range(n):
+         for f in r.header():
+             if f == 0:
+                 inval[k] = r.f32()
+             elif f == 1:
+-                P[k] = _vec(r)
++                positions[k] = _vec(r)
+             elif f == 2:
+-                A[k] = _vec(r)
++                arrive[k] = _vec(r)
+             elif f == 3:
+-                L[k] = _vec(r)
++                leave[k] = _vec(r)
+             elif f == 4:
+-                r.u8()
++                modes[k] = r.u8()
+             else:
+                 raise ValueError(f"unexpected curve point field {f}")
+-    return inval, P, A, L
++
++    is_looped = False
++    loop_key_offset = 0.0
++    for f in curve_fields:
++        if f == 1:
++            is_looped = bool(r.u8())
++        elif f == 2:
++            loop_key_offset = float(r.f32())
++        elif f != 0:
++            raise ValueError(f"unexpected FInterpCurve field {f}")
++
++    arrays = (inval, positions, arrive, leave)
++    if n and not all(np.all(np.isfinite(a)) for a in arrays):
++        raise ValueError(f"non-finite spline data in {export_name}")
++    if n > 1 and np.any(np.diff(inval) <= 0):
++        raise ValueError(f"non-increasing spline input keys in {export_name}")
++    if np.any(modes > CIM_UNKNOWN):
++        raise ValueError(f"unsupported spline interpolation mode in {export_name}: {modes.max()}")
++    # Unreal defines this as the interval from the last input key to the
++    # virtual loop point, not as the total first-to-last key span.
++    if is_looped and n > 1 and (not np.isfinite(loop_key_offset) or loop_key_offset <= 0):
++        raise ValueError(f"invalid LoopKeyOffset in {export_name}: {loop_key_offset}")
++
++    return SplineCurve(inval, positions, arrive, leave, modes, is_looped, loop_key_offset)
++
++
++def read_spline_points(pk: Package, export_name: str):
++    """Backward-compatible reader: (inval, positions, arrive, leave), in UE cm."""
++    c = read_spline_curve(pk, export_name)
++    return c.input_keys, c.positions, c.arrive_tangents, c.leave_tangents
++
++
++def _point_segment_distance(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
++    ab = b - a
++    den = float(ab @ ab)
++    if den <= 1e-24:
++        return float(np.linalg.norm(p - a))
++    t = float(np.clip(((p - a) @ ab) / den, 0.0, 1.0))
++    return float(np.linalg.norm(p - (a + t * ab)))
++
++
++def _split_bezier(c: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
++    b0, b1, b2, b3 = c
++    b01 = (b0 + b1) * 0.5
++    b12 = (b1 + b2) * 0.5
++    b23 = (b2 + b3) * 0.5
++    b012 = (b01 + b12) * 0.5
++    b123 = (b12 + b23) * 0.5
++    mid = (b012 + b123) * 0.5
++    return (np.stack((b0, b01, b012, mid)),
++            np.stack((mid, b123, b23, b3)))
++
++
++def _append_unique(out: list[np.ndarray], point: np.ndarray, eps: float = 1e-9):
++    if not out or np.linalg.norm(point - out[-1]) > eps:
++        out.append(np.asarray(point, dtype=np.float64).copy())
++
++
++def _append_adaptive_bezier(control: np.ndarray, out: list[np.ndarray], step_cm: float,
++                            tolerance_cm: float, depth: int, max_depth: int,
++                            max_points: int):
++    """Append a cubic Bezier endpoint using convex-hull length/flatness bounds."""
++    b0, b1, b2, b3 = control
++    polygon = (float(np.linalg.norm(b1 - b0)) + float(np.linalg.norm(b2 - b1))
++               + float(np.linalg.norm(b3 - b2)))
++    flatness = max(_point_segment_distance(b1, b0, b3),
++                   _point_segment_distance(b2, b0, b3))
++    if polygon <= step_cm and flatness <= tolerance_cm:
++        _append_unique(out, b3)
++        if len(out) > max_points:
++            raise ValueError(f"spline sampling exceeded the {max_points:,} point safety limit")
++        return
++    if depth >= max_depth:
++        raise ValueError("spline adaptive sampling reached max depth; curve is too sharp or malformed")
++    left, right = _split_bezier(control)
++    _append_adaptive_bezier(left, out, step_cm, tolerance_cm, depth + 1, max_depth, max_points)
++    _append_adaptive_bezier(right, out, step_cm, tolerance_cm, depth + 1, max_depth, max_points)
++
++
++def sample_spline(curve: SplineCurve, step_cm: float = 50.0,
++                  tolerance_cm: float = 1.0, max_depth: int = 16,
++                  max_points: int = 2_000_000) -> np.ndarray:
++    """Sample FInterpCurveVector using Unreal's key-interval and mode semantics.
++
++    Unreal scales endpoint tangents by the input-key interval before cubic
++    Hermite interpolation. This implementation converts the resulting segment
++    to an equivalent Bezier and subdivides it adaptively. Linear interpolation
++    is sampled directly. Constant interpolation is rejected when it would
++    create a positional jump, because the downstream road representation is a
++    continuous polyline and must not invent a diagonal ramp across that jump.
++    """
++    if not np.isfinite(step_cm) or step_cm <= 0:
++        raise ValueError("step_cm must be finite and positive")
++    if not np.isfinite(tolerance_cm) or tolerance_cm < 0:
++        raise ValueError("tolerance_cm must be finite and non-negative")
++    if not isinstance(max_depth, int) or max_depth < 0:
++        raise ValueError("max_depth must be a non-negative integer")
++    if not isinstance(max_points, int) or max_points < 2:
++        raise ValueError("max_points must be an integer >= 2")
++
++    P = np.asarray(curve.positions, np.float64)
++    keys = np.asarray(curve.input_keys, np.float64)
++    arrive = np.asarray(curve.arrive_tangents, np.float64)
++    leave = np.asarray(curve.leave_tangents, np.float64)
++    modes = np.asarray(curve.interp_modes, np.uint8)
++    n = len(P)
++    if P.shape != (n, 3) or keys.shape != (n,) or arrive.shape != (n, 3)             or leave.shape != (n, 3) or modes.shape != (n,):
++        raise ValueError("spline curve arrays have inconsistent shapes")
++    if not all(np.all(np.isfinite(a)) for a in (P, keys, arrive, leave)):
++        raise ValueError("spline curve contains non-finite values")
++    if np.any(modes > CIM_UNKNOWN):
++        raise ValueError("spline curve contains an unsupported interpolation mode")
++    if n > 1 and np.any(np.diff(keys) <= 0):
++        raise ValueError("spline input keys must be strictly increasing")
++    if n == 0:
++        return np.zeros((0, 3), dtype=np.float64)
++    if n == 1:
++        return P.copy()
++
++    segments = [(i, i + 1, float(keys[i + 1] - keys[i])) for i in range(n - 1)]
++    if curve.is_looped:
++        # FInterpCurve::Eval uses LoopKeyOffset itself as the final segment Diff.
++        if not np.isfinite(curve.loop_key_offset) or curve.loop_key_offset <= 0:
++            raise ValueError("looped spline has a non-positive LoopKeyOffset")
++        segments.append((n - 1, 0, float(curve.loop_key_offset)))
++
++    out: list[np.ndarray] = [P[0].copy()]
++    for i, j, diff in segments:
++        if diff <= 0 or not np.isfinite(diff):
++            raise ValueError(f"invalid spline input-key interval at segment {i}")
++        mode = int(modes[i])
++        p0, p1 = P[i], P[j]
++
++        if mode == CIM_CONSTANT:
++            if np.linalg.norm(p1 - p0) > 1e-6:
++                raise ValueError(f"constant spline segment {i} is discontinuous; cannot use as road geometry")
++            _append_unique(out, p1)
++            continue
++
++        if mode == CIM_LINEAR:
++            length = float(np.linalg.norm(p1 - p0))
++            count = max(1, int(np.ceil(length / step_cm)))
++            if len(out) + count > max_points:
++                raise ValueError(f"spline sampling exceeded the {max_points:,} point safety limit")
++            for k in range(1, count + 1):
++                _append_unique(out, p0 + (p1 - p0) * (k / count))
++            continue
++
++        # As in FInterpCurve::Eval, every non-linear/non-constant mode uses
++        # cubic interpolation. CIM_Unknown is documented as invalid, but UE's
++        # evaluator takes the cubic branch for it; preserve that behavior.
++        m0 = leave[i] * diff
++        m1 = arrive[j] * diff
++        control = np.stack((p0, p0 + m0 / 3.0, p1 - m1 / 3.0, p1))
++        _append_adaptive_bezier(control, out, step_cm, tolerance_cm, 0, max_depth, max_points)
++
++    result = np.asarray(out, np.float64)
++    if not np.all(np.isfinite(result)):
++        raise ValueError("spline sampling produced non-finite coordinates")
++    return result
+ 
+ 
+ def sample_hermite(P, A, L, step_cm: float = 50.0) -> np.ndarray:
+-    """Densely sample a UE CurveUser/CurveAuto spline (cubic Hermite per segment)."""
+-    out = []
+-    for i in range(len(P) - 1):
+-        p0, p1, m0, m1 = P[i], P[i + 1], L[i], A[i + 1]
+-        seg = np.linalg.norm(p1 - p0)
+-        n = max(2, int(seg / step_cm) + 1)
+-        t = np.linspace(0, 1, n, endpoint=False)[:, None]
+-        h00 = 2 * t**3 - 3 * t**2 + 1
+-        h10 = t**3 - 2 * t**2 + t
+-        h01 = -2 * t**3 + 3 * t**2
+-        h11 = t**3 - t**2
+-        out.append(h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1)
+-    out.append(P[-1:])
+-    return np.vstack(out)
++    """Compatibility helper for uniform-key cubic curves."""
++    P = np.asarray(P, np.float64)
++    A = np.asarray(A, np.float64)
++    L = np.asarray(L, np.float64)
++    if P.ndim != 2 or P.shape[1:] != (3,) or A.shape != P.shape or L.shape != P.shape:
++        raise ValueError("P, A and L must be arrays of shape (N, 3)")
++    n = len(P)
++    curve = SplineCurve(np.arange(n, dtype=np.float64), P, A, L,
++                        np.full(n, CIM_CURVE_USER, dtype=np.uint8))
++    return sample_spline(curve, step_cm=step_cm)
+ 
+ 
+ def level_splines(pk: Package) -> dict[str, np.ndarray]:
+-    """All non-empty DMSplineComponents of the level, sampled densely, in metres
+-    (x, y horizontal, z up; UE axes kept)."""
++    """All non-empty route/border splines, sampled in metres (UE axes kept)."""
+     res = {}
+     for name in ("CenterSpline", "IdealSpline", "LeftBorderSpline", "RightBorderSpline"):
+         try:
+-            _, P, A, L = read_spline_points(pk, name)
++            curve = read_spline_curve(pk, name)
+         except StopIteration:
+             continue
+-        if len(P) > 1:
+-            res[name] = sample_hermite(P, A, L) / 100.0
++        if len(curve.positions) > 1:
++            res[name] = sample_spline(curve) / 100.0
+     return res
+diff --git a/stagegen/inspect_collision.py b/stagegen/inspect_collision.py
+new file mode 100644
+index 0000000..3a347db
+--- /dev/null
++++ b/stagegen/inspect_collision.py
+@@ -0,0 +1,388 @@
++# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
++# SPDX-License-Identifier: MIT
++
++"""Read-only stage geometry/collision inventory for UE 5.6 World Partition stages.
++
++The inspector deliberately does not modify assets. It exports collision mesh
++statistics, approximate road-to-collision correspondence, and the primitive
++shape inventory from DA_<Level>BakedData.
++"""
++from __future__ import annotations
++
++import csv
++import json
++import os
++import re
++import struct
++from collections import Counter
++
++import numpy as np
++from scipy.spatial import cKDTree
++
++from .build import writers as W
++from .extract.real import load_wp_source
++from .extract.zen import Package
++
++
++def _fstring_from_raw(data: bytes) -> str:
++    if len(data) < 4:
++        return ""
++    n, = struct.unpack_from("<i", data, 0)
++    if n == 0:
++        return ""
++    if n > 0 and 4 + n <= len(data):
++        return data[4:4 + n].rstrip(b"\0").decode("latin-1", errors="replace")
++    if n < 0 and 4 + (-2 * n) <= len(data):
++        return data[4:4 + (-2 * n)].decode("utf-16-le", errors="replace").rstrip("\0")
++    return "<invalid-fstring>"
++
++
++def _actor_path(pk: Package, mesh) -> str:
++    pkg = pk.mapped(*mesh.soft_pkg)
++    asset = pk.mapped(*mesh.soft_asset)
++    sub = _fstring_from_raw(mesh.soft_sub)
++    return sub or f"{pkg}.{asset}"
++
++
++def _material_path(pk: Package, ref: int) -> str:
++    if ref < 0:
++        i = -ref - 1
++        try:
++            return pk.imported_package_names()[i]
++        except (IndexError, ValueError):
++            return f"import[{i}]"
++    if ref > 0:
++        i = ref - 1
++        return pk.exports[i].name if i < len(pk.exports) else f"export[{i}]"
++    return "none"
++
++
++def _kind(actor: str, material: str) -> str:
++    text = f"{actor} {material}".lower()
++    if "originquad" in text:
++        return "origin"
++    if "road" in text:
++        return "road"
++    if "terrain" in text or "landscape" in text:
++        return "terrain"
++    if "pcggrass" in text or "grass" in text:
++        return "vegetation"
++    return "other"
++
++
++def _safe_name(value: str) -> str:
++    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._") or "stage"
++
++
++
++def _closest_points_on_triangles(points: np.ndarray, triangles: np.ndarray) -> np.ndarray:
++    """Closest points on triangles for broadcast-compatible point/triangle arrays.
++
++    points: (..., 3), triangles: (..., 3, 3), with matching leading dimensions.
++    Uses plane projection when the projection lies inside the face; otherwise
++    selects the nearest of the three edge segments. Degenerate triangles fall
++    back to their edges.
++    """
++    p = np.asarray(points, dtype=np.float64)
++    tri = np.asarray(triangles, dtype=np.float64)
++    a, b, c = tri[..., 0, :], tri[..., 1, :], tri[..., 2, :]
++
++    def on_segment(x, u, v):
++        uv = v - u
++        den = np.sum(uv * uv, axis=-1)
++        t = np.divide(np.sum((x - u) * uv, axis=-1), den,
++                      out=np.zeros_like(den), where=den > 1e-20)
++        t = np.clip(t, 0.0, 1.0)
++        return u + t[..., None] * uv
++
++    q_ab = on_segment(p, a, b)
++    q_bc = on_segment(p, b, c)
++    q_ca = on_segment(p, c, a)
++    d_ab = np.sum((p - q_ab) ** 2, axis=-1)
++    d_bc = np.sum((p - q_bc) ** 2, axis=-1)
++    d_ca = np.sum((p - q_ca) ** 2, axis=-1)
++    edge_q = np.stack((q_ab, q_bc, q_ca), axis=-2)
++    edge_d = np.stack((d_ab, d_bc, d_ca), axis=-1)
++    best_edge = np.argmin(edge_d, axis=-1)
++    edge_best = np.take_along_axis(edge_q, best_edge[..., None, None], axis=-2)[..., 0, :]
++
++    ab, ac = b - a, c - a
++    normal = np.cross(ab, ac)
++    n2 = np.sum(normal * normal, axis=-1)
++    signed_num = np.sum((p - a) * normal, axis=-1)
++    proj = p - np.divide(signed_num, n2, out=np.zeros_like(signed_num), where=n2 > 1e-20)[..., None] * normal
++    ap = proj - a
++    d00 = np.sum(ab * ab, axis=-1)
++    d01 = np.sum(ab * ac, axis=-1)
++    d11 = np.sum(ac * ac, axis=-1)
++    d20 = np.sum(ap * ab, axis=-1)
++    d21 = np.sum(ap * ac, axis=-1)
++    denom = d00 * d11 - d01 * d01
++    v = np.divide(d11 * d20 - d01 * d21, denom,
++                  out=np.zeros_like(denom), where=np.abs(denom) > 1e-20)
++    w = np.divide(d00 * d21 - d01 * d20, denom,
++                  out=np.zeros_like(denom), where=np.abs(denom) > 1e-20)
++    inside = (n2 > 1e-20) & (v >= -1e-10) & (w >= -1e-10) & (v + w <= 1.0 + 1e-10)
++    return np.where(inside[..., None], proj, edge_best)
++
++
++def _resample_route(points: np.ndarray, widths: np.ndarray, step_m: float = 10.0):
++    """Resample route and width arrays at an approximately uniform arc-length step."""
++    p = np.asarray(points, dtype=np.float64)
++    w = np.asarray(widths, dtype=np.float64)
++    if len(p) < 2:
++        return p, w
++    seg = np.linalg.norm(np.diff(p[:, :3], axis=0), axis=1)
++    cumulative = np.r_[0.0, np.cumsum(seg)]
++    total = float(cumulative[-1])
++    if total <= 0:
++        return p[:1], w[:1]
++    stations = np.arange(0.0, total, max(1.0, step_m))
++    if len(stations) == 0 or stations[-1] < total:
++        stations = np.r_[stations, total]
++    result = np.column_stack([np.interp(stations, cumulative, p[:, axis]) for axis in range(3)])
++    out_width = np.interp(stations, cumulative, w)
++    return result, out_width
++
++def inspect_one(fs, level: str, out_dir: str, corridor_m: float = 30.0,
++                write_obj: bool = False) -> dict:
++    """Inspect one source level and write JSON/CSV plus optional OBJ exports."""
++    ws = load_wp_source(fs, level)
++    baked_pk = Package(fs.read(ws.baked))
++    baked = W.read_baked_full(baked_pk)
++    shape_info = W.inspect_baked_shapes(baked_pk, baked)
++
++    route = np.asarray(ws.stage.points, dtype=np.float64)
++    if len(route) < 2:
++        raise ValueError(f"{level}: route spline has fewer than two points")
++    route_tree = cKDTree(route[:, :2])
++    route_step = float(np.median(np.linalg.norm(np.diff(route[:, :2], axis=0), axis=1)))
++    mesh_rows = []
++    kind_counts = Counter()
++    group_counts = Counter()
++    total_tris = 0
++    road_triangles = []
++    obj_buffers = {"road": [], "terrain": []}
++
++    for mesh_index, mesh in enumerate(baked.meshes):
++        actor = _actor_path(baked_pk, mesh)
++        material = _material_path(baked_pk, mesh.material_ref)
++        kind = _kind(actor, material)
++        kind_counts[kind] += 1
++        group_counts[str(mesh.group)] += 1
++
++        # BakedData stores (X, up, Y); convert to UE world axes (X, Y, Z-up).
++        vertices = np.asarray(mesh.vertices, dtype=np.float64)[:, [0, 2, 1]]
++        raw_indices = np.asarray(mesh.indices, dtype=np.uint32).reshape(-1)
++        if raw_indices.size % 3:
++            raise ValueError(f"{actor}: index count {raw_indices.size} is not divisible by 3")
++        tris_all = raw_indices.reshape(-1, 3)
++        valid = np.all(tris_all < len(vertices), axis=1)
++        invalid_count = int((~valid).sum())
++        tris = tris_all[valid].astype(np.int64, copy=False)
++        tri_count = len(tris)
++        total_tris += tri_count
++
++        row = {
++            "mesh_index": mesh_index, "kind": kind, "actor": actor,
++            "material_ref": int(mesh.material_ref), "material": material,
++            "collision_group": int(mesh.group), "vertices": int(len(vertices)),
++            "triangles": int(tri_count), "invalid_index_triangles": invalid_count,
++            "degenerate_triangles": 0, "zero_area_triangles": 0,
++            "min_route_distance_m": None, "p50_route_distance_m": None,
++            "p95_route_distance_m": None, "max_route_distance_m": None,
++            "within_corridor_triangles": 0, "route_s_min_m": None, "route_s_max_m": None,
++            "bounds_min_x": None, "bounds_min_y": None, "bounds_min_z": None,
++            "bounds_max_x": None, "bounds_max_y": None, "bounds_max_z": None,
++            "median_triangle_area_m2": None, "upward_normal_fraction": None,
++        }
++        if len(vertices):
++            lo, hi = vertices.min(0), vertices.max(0)
++            row.update({
++                "bounds_min_x": float(lo[0]), "bounds_min_y": float(lo[1]), "bounds_min_z": float(lo[2]),
++                "bounds_max_x": float(hi[0]), "bounds_max_y": float(hi[1]), "bounds_max_z": float(hi[2]),
++            })
++        if tri_count:
++            p = vertices[tris]
++            repeated = ((tris[:, 0] == tris[:, 1]) | (tris[:, 1] == tris[:, 2]) |
++                        (tris[:, 0] == tris[:, 2]))
++            cross = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
++            area = np.linalg.norm(cross, axis=1) * 0.5
++            zero_area = area <= 1e-10
++            row["degenerate_triangles"] = int(repeated.sum())
++            row["zero_area_triangles"] = int(zero_area.sum())
++            row["median_triangle_area_m2"] = float(np.median(area))
++            nz = np.abs(cross[:, 2]) / np.maximum(np.linalg.norm(cross, axis=1), 1e-12)
++            row["upward_normal_fraction"] = float(np.mean(nz > 0.5))
++
++            # Triangle-centre proximity is an inventory metric, not a collision
++            # raycast. It helps rank which source meshes lie along the route.
++            centres = p.mean(axis=1)
++            distances, nearest = route_tree.query(centres[:, :2], k=1)
++            nearest_s = nearest.astype(np.float64) * route_step
++            row.update({
++                "min_route_distance_m": float(np.min(distances)),
++                "p50_route_distance_m": float(np.median(distances)),
++                "p95_route_distance_m": float(np.percentile(distances, 95)),
++                "max_route_distance_m": float(np.max(distances)),
++                "within_corridor_triangles": int(np.count_nonzero(distances <= corridor_m)),
++                "route_s_min_m": float(np.min(nearest_s[distances <= corridor_m])) if np.any(distances <= corridor_m) else None,
++                "route_s_max_m": float(np.max(nearest_s[distances <= corridor_m])) if np.any(distances <= corridor_m) else None,
++            })
++            if kind == "road":
++                road_triangles.append(p)
++            if write_obj and kind in obj_buffers and len(tris):
++                obj_buffers[kind].append((vertices, tris))
++        mesh_rows.append(row)
++
++    # More precise route-to-collision correspondence: resample the route at 10 m,
++    # find the nearest 64 road-triangle centroids in XY, then calculate exact
++    # point-to-triangle distances in 3D for those candidates. This is still a
++    # bounded-neighbour approximation (not a full Unreal raycast), but unlike
++    # centroid-only matching it measures distance to the actual triangle faces.
++    route_check, width_check = _resample_route(route, np.asarray(ws.stage.width, dtype=np.float64), 10.0)
++    coverage = {"available": False, "method": "nearest 64 XY triangle centroids + exact 3D point-to-triangle distance",
++                "sample_spacing_m": 10.0, "sample_count": int(len(route_check)), "covered_samples": 0,
++                "coverage_fraction": None, "p50_3d_distance_m": None,
++                "p95_3d_distance_m": None, "max_3d_distance_m": None,
++                "p95_xy_distance_m": None, "median_height_delta_m": None,
++                "height_tolerance_m": [-3.0, 1.5]}
++    if road_triangles:
++        RT = np.concatenate(road_triangles, axis=0)
++        RT_centres = RT.mean(axis=1)
++        rt = cKDTree(RT_centres[:, :2])
++        k = min(64, len(RT_centres))
++        _centroid_dist, candidate_ix = rt.query(route_check[:, :2], k=k)
++        if k == 1:
++            candidate_ix = candidate_ix[:, None]
++        candidates = RT[candidate_ix]
++        query_points = np.broadcast_to(route_check[:, None, :], (len(route_check), k, 3))
++        closest = _closest_points_on_triangles(query_points, candidates)
++        delta = closest - query_points
++        d3 = np.linalg.norm(delta, axis=2)
++        best = np.argmin(d3, axis=1)
++        rows = np.arange(len(route_check))
++        best_d3 = d3[rows, best]
++        best_closest = closest[rows, best]
++        best_xy = np.linalg.norm(best_closest[:, :2] - route_check[:, :2], axis=1)
++        dz = best_closest[:, 2] - route_check[:, 2]
++        half_width = width_check / 2.0
++        xy_ok = best_xy <= np.maximum(half_width + 2.0, 4.0)
++        z_ok = (dz >= -3.0) & (dz <= 1.5)
++        good = xy_ok & z_ok
++        coverage = {
++            "available": True,
++            "method": "nearest 64 XY triangle centroids + exact 3D point-to-triangle distance",
++            "sample_spacing_m": 10.0, "sample_count": int(len(route_check)),
++            "covered_samples": int(good.sum()),
++            "coverage_fraction": float(good.mean()),
++            "p50_3d_distance_m": float(np.percentile(best_d3, 50)),
++            "p95_3d_distance_m": float(np.percentile(best_d3, 95)),
++            "max_3d_distance_m": float(np.max(best_d3)),
++            "p95_xy_distance_m": float(np.percentile(best_xy, 95)),
++            "median_height_delta_m": float(np.median(dz)),
++            "height_tolerance_m": [-3.0, 1.5],
++            "xy_tolerance_per_sample_m": "max(road_half_width + 2 m, 4 m)",
++            "candidate_triangle_count": int(len(RT)),
++            "candidate_centroids_per_sample": int(k),
++        }
++
++    env_prefix = f"acr/Content/Environments/{level}/"
++    source_assets = {
++        "road_mesh_chunks": [], "terrain_mesh_chunks": [],
++        "physical_material_masks": [], "terrain_masks": [], "terrain_meshes": [],
++    }
++    for path in sorted(fs.index):
++        if not path.startswith(env_prefix):
++            continue
++        lower = path.lower()
++        if "/generatedsplits/" in lower and "_road_" in lower and path.endswith(".uasset"):
++            source_assets["road_mesh_chunks"].append(path)
++        elif "/generatedsplits/" in lower and "_terrain_" in lower and path.endswith(".uasset"):
++            source_assets["terrain_mesh_chunks"].append(path)
++        elif "/physmatmasks/" in lower:
++            source_assets["physical_material_masks"].append(path)
++        elif "/terrainmasks/" in lower:
++            source_assets["terrain_masks"].append(path)
++        elif "/meshesterrain/" in lower:
++            source_assets["terrain_meshes"].append(path)
++
++    report = {
++        "schema_version": 1,
++        "stage": level,
++        "source_map": ws.main,
++        "baked_data_asset": ws.baked,
++        "route_length_m": float(np.linalg.norm(np.diff(route, axis=0), axis=1).sum()),
++        "route_sample_step_m": route_step,
++        "route_sample_count": int(len(route)),
++        "route_centreline_m": np.round(route, 3).tolist(),
++        "route_width_m": np.round(np.asarray(ws.stage.width, dtype=np.float64), 3).tolist(),
++        "source_asset_inventory": {k: {"count": len(v), "paths": v} for k, v in source_assets.items()},
++        "collision_mesh_count": int(len(mesh_rows)),
++        "collision_triangle_count": int(total_tris),
++        "mesh_kind_counts": dict(kind_counts),
++        "collision_group_mesh_counts": dict(group_counts),
++        "road_collision_centreline_coverage": coverage,
++        "primitive_collision_shapes": shape_info,
++        "notes": [
++            "Road-to-collision coverage uses exact point-to-triangle distance for the 64 closest triangle centroids in XY at 10 m route intervals; it is a bounded candidate search, not an Unreal physics raycast.",
++            "Primitive-shape field payloads are inventoried but not decoded semantically.",
++            "A clean report does not prove Unreal's runtime physics/replay systems will accept the stage."
++        ],
++        "meshes": mesh_rows,
++    }
++
++    os.makedirs(out_dir, exist_ok=True)
++    stem = _safe_name(level)
++    json_path = os.path.join(out_dir, stem + "_collision.json")
++    csv_path = os.path.join(out_dir, stem + "_collision_meshes.csv")
++    with open(json_path, "w", encoding="utf-8") as f:
++        json.dump(report, f, indent=2, ensure_ascii=False)
++    if mesh_rows:
++        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
++            writer = csv.DictWriter(f, fieldnames=list(mesh_rows[0]))
++            writer.writeheader(); writer.writerows(mesh_rows)
++    if write_obj:
++        for kind, items in obj_buffers.items():
++            if not items:
++                continue
++            path = os.path.join(out_dir, f"{stem}_{kind}_collision.obj")
++            with open(path, "w", encoding="ascii", newline="\n") as f:
++                f.write(f"# ACR Remixer collision export: {level} / {kind}\n")
++                offset = 1
++                for vertices, tris in items:
++                    for v in vertices:
++                        f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
++                    for t in tris:
++                        f.write(f"f {int(t[0])+offset} {int(t[1])+offset} {int(t[2])+offset}\n")
++                    offset += len(vertices)
++        route_path = os.path.join(out_dir, f"{stem}_route_centreline.obj")
++        with open(route_path, "w", encoding="ascii", newline="\n") as f:
++            f.write(f"# ACR Remixer source route centreline: {level}\n")
++            for p in route:
++                f.write(f"v {p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
++            if len(route) >= 2:
++                f.write("l " + " ".join(str(i) for i in range(1, len(route) + 1)) + "\n")
++    print(f"  collision inspector: {len(mesh_rows)} meshes, {total_tris:,} triangles; "
++          f"road-centreline coverage {coverage['coverage_fraction'] if coverage['available'] else 'n/a'}")
++    print(f"  wrote {json_path}")
++    print(f"  wrote {csv_path}")
++    if write_obj:
++        print(f"  wrote {os.path.join(out_dir, stem + '_route_centreline.obj')}")
++    return report
++
++
++def inspect_levels(fs, levels: list[str], out_dir: str,
++                   corridor_m: float = 30.0, write_obj: bool = False) -> dict:
++    all_reports, errors = [], []
++    for level in levels:
++        try:
++            all_reports.append(inspect_one(fs, level, out_dir, corridor_m, write_obj))
++        except Exception as exc:  # report per-stage failure and continue through remaining stages
++            errors.append({"stage": level, "error": f"{type(exc).__name__}: {exc}"})
++            print(f"  skip {level}: {type(exc).__name__}: {exc}")
++    index = {"schema_version": 1, "inspected": [r["stage"] for r in all_reports], "errors": errors,
++             "report_count": len(all_reports)}
++    with open(os.path.join(out_dir, "collision_inspection_index.json"), "w", encoding="utf-8") as f:
++        json.dump(index, f, indent=2)
++    return index
+diff --git a/stagegen/joins.py b/stagegen/joins.py
+index 3694ca1..f55cc6d 100644
+--- a/stagegen/joins.py
++++ b/stagegen/joins.py
+@@ -1,15 +1,17 @@
+ # SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+ # SPDX-License-Identifier: MIT
+ 
+-"""Smooth the joins between pieces (kinks in direction and gradient).
+-
+-Pieces meet on a grid line, edge to edge. Rotating a piece would open the
+-edge, so instead each side of the line is *sheared along the line*: a point at
+-distance d from the line moves by A * g(d) along it (and by Az * g(d) up),
+-with g(0) = 0, g'(0) = 1, g(D) = g'(D) = 0. Points on the line stay put (the
+-meshes stay seamless), the road's crossing angle (and slope) at the line
+-changes by the amount needed to meet the other side, and beyond D nothing
+-moves. A kink becomes a smooth bend about 2 D long.
++"""Constrained, tile-boundary join shears for recombined road sections.
++
++The shear is applied in the boundary-normal coordinate. The public join API
++accepts a requested reach measured along each road; it converts this to the
++normal-coordinate reach so shallow boundary crossings do not accidentally
++stretch a nominal transition over several hundred metres of road.
++
++The current compact-support profile is C1 (position and tangent continuous)
++but not C2 at the outer edge. Replacing it with a higher-order profile is
++intentionally deferred until source-stage curvature and in-game measurements
++can be used to calibrate the trade-off.
+ """
+ from __future__ import annotations
+ 
+@@ -19,27 +21,137 @@ import numpy as np
+ 
+ 
+ def _g(d: np.ndarray, D: float) -> np.ndarray:
++    """Compact-support displacement profile; g(0)=0, g'(0)=1, g(D)=g'(D)=0."""
++    if not np.isfinite(D) or D <= 0:
++        raise ValueError("shear reach must be finite and positive")
+     u = np.clip(d / D, 0.0, 1.0)
+     return d * (1.0 - u) ** 2 * (d < D)
+ 
+ 
+ def _dg(d: np.ndarray, D: float) -> np.ndarray:
++    if not np.isfinite(D) or D <= 0:
++        raise ValueError("shear reach must be finite and positive")
+     u = np.clip(d / D, 0.0, 1.0)
+     return ((1.0 - u) ** 2 - 2.0 * u * (1.0 - u)) * (d < D)
+ 
+ 
+-@dataclass
++@dataclass(frozen=True)
++class JoinAssessment:
++    """Geometric quantities required to construct both sides of a join."""
++
++    a_in: float
++    a_out: float
++    kink_deg: float
++    normal_in: float
++    normal_out: float
++    A_prev: float
++    A_next: float
++    Az_prev: float
++    Az_next: float
++    D_prev_normal: float
++    D_next_normal: float
++    max_boundary_parallel_shift_m: float
++    max_vertical_shift_m: float
++    reach_prev_m: float
++    reach_next_m: float
++
++
++def assess_join(line_angle: float, h_prev: float, h_next: float,
++                g_prev: float, g_next: float,
++                reach_prev_m: float, reach_next_m: float,
++                max_kink_deg: float = 60.0,
++                min_normal_component: float = 0.2) -> JoinAssessment | None:
++    """Assess a join before modifying geometry; return None if ill-conditioned.
++
++    ``reach_prev_m`` and ``reach_next_m`` are nominal source-road arclengths.
++    The normal-component threshold caps the inverse boundary-projection factor
++    at ``1 / min_normal_component``. It is a rejection criterion, not a
++    denominator clamp: near-parallel crossings are not silently treated as
++    ordinary crossings.
++    """
++    vals = (line_angle, h_prev, h_next, g_prev, g_next, reach_prev_m,
++            reach_next_m, max_kink_deg, min_normal_component)
++    if not all(np.isfinite(v) for v in vals):
++        return None
++    if reach_prev_m <= 0 or reach_next_m <= 0 or max_kink_deg < 0:
++        return None
++    if not (0 < min_normal_component < 1):
++        return None
++
++    e = np.array([np.cos(line_angle), np.sin(line_angle)], dtype=np.float64)
++    n = np.array([-e[1], e[0]], dtype=np.float64)
++    u_out = np.array([np.cos(h_next), np.sin(h_next)], dtype=np.float64)
++    if u_out @ n < 0:
++        n = -n
++    u_in = np.array([np.cos(h_prev), np.sin(h_prev)], dtype=np.float64)
++    normal_in = float(u_in @ n)
++    normal_out = float(u_out @ n)
++    if normal_in < min_normal_component or normal_out < min_normal_component:
++        return None
++
++    a_in = float(np.arctan2(u_in @ e, normal_in))
++    a_out = float(np.arctan2(u_out @ e, normal_out))
++    kink_deg = float(np.degrees(a_out - a_in))
++    if abs(kink_deg) > max_kink_deg:
++        return None
++
++    # Solve the exact tangent-matching shear coefficients on either side.
++    a_mid = (a_in + a_out) * 0.5
++    tan_in, tan_out, tan_mid = np.tan(a_in), np.tan(a_out), np.tan(a_mid)
++    A_next = tan_mid - tan_out
++    A_prev = tan_in - tan_mid
++    g_mid = (g_prev + g_next) * 0.5
++    # Horizontal shear changes the horizontal speed along the transformed
++    # curve. Its normal component remains cos(a), while its target direction
++    # is a_mid, so |dXY_new/ds_source| = cos(a) / cos(a_mid). Match grade
++    # dz / ds_horizontal after that speed change, not dz per source parameter.
++    cos_mid = float(np.cos(a_mid))
++    Az_next = g_mid / cos_mid - g_next / normal_out
++    Az_prev = g_prev / normal_in - g_mid / cos_mid
++
++    # The requested reach is measured along the un-deformed source road;
++    # convert it to the boundary-normal coordinate used by Shear.apply().
++    D_prev = reach_prev_m * normal_in
++    D_next = reach_next_m * normal_out
++    if min(D_prev, D_next) <= 1e-6:
++        return None
++
++    # max of d*(1-d/D)^2 is 4D/27 at d=D/3.
++    max_boundary_parallel = max(abs(A_prev) * 4 * D_prev / 27,
++                                 abs(A_next) * 4 * D_next / 27)
++    max_vertical = max(abs(Az_prev) * 4 * D_prev / 27,
++                       abs(Az_next) * 4 * D_next / 27)
++    derived = (A_prev, A_next, Az_prev, Az_next, D_prev, D_next,
++               max_boundary_parallel, max_vertical)
++    if not all(np.isfinite(v) for v in derived):
++        return None
++
++    return JoinAssessment(a_in, a_out, abs(kink_deg), normal_in, normal_out,
++                          A_prev, A_next, Az_prev, Az_next, D_prev, D_next,
++                          max_boundary_parallel, max_vertical, reach_prev_m, reach_next_m)
++
++
++@dataclass(frozen=True)
+ class Shear:
+     p0: np.ndarray        # (2,) a point on the join line (layout frame, m)
+     e: np.ndarray         # (2,) unit vector along the line
+     n: np.ndarray         # (2,) unit normal pointing into this side
+     A: float              # along-line shear at the line (dx_e / dd)
+     Az: float             # vertical shear at the line (dz / dd)
+-    D: float              # reach (m)
++    D: float              # reach in the boundary-normal coordinate (m)
+ 
+     def shifted(self, off: np.ndarray) -> "Shear":
+         return Shear(self.p0 + off[:2], self.e, self.n, self.A, self.Az, self.D)
+ 
++    @property
++    def max_boundary_parallel_shift_m(self) -> float:
++        """Maximum displacement parallel to the tile boundary, not road-lateral."""
++        return abs(self.A) * 4.0 * self.D / 27.0
++
++    @property
++    def max_vertical_shift_m(self) -> float:
++        return abs(self.Az) * 4.0 * self.D / 27.0
++
+     def _d(self, xy):
+         return (np.atleast_2d(xy)[:, :2] - self.p0) @ self.n
+ 
+@@ -57,44 +169,37 @@ class Shear:
+         return P
+ 
+     def yaw(self, xy: np.ndarray) -> np.ndarray:
+-        """Local rotation (rad) of the map at xy (for objects' headings): the
+-        shear turns directions along n by atan(A g'(d))."""
++        """Local map yaw change of directions along the boundary normal."""
+         d = self._d(xy)
+         dg = np.where(d > 0, _dg(np.maximum(d, 0), self.D), 0.0)
+-        # a direction along n becomes n + A g' e: turned towards e (z of n x e gives the sense)
+         sense = np.sign(self.n[0] * self.e[1] - self.n[1] * self.e[0])
+         return np.arctan(self.A * dg) * sense
+ 
+ 
+-def _cross_angle(u: np.ndarray, e: np.ndarray, n: np.ndarray) -> float:
+-    return float(np.arctan2(u @ e, u @ n))
+-
+-
+-def join_shears(p0, line_angle: float, h_prev: float, h_next: float, g_prev: float, g_next: float,
+-                D_prev: float, D_next: float, max_kink_deg: float = 60.0):
+-    """Shears for both sides of one join. p0: join point (layout frame);
+-    line_angle: world angle of the grid line; h_prev/h_next: road headings
+-    (rad, direction of travel) arriving/leaving; g_prev/g_next: gradients.
+-    Returns (shear for the previous piece's side, shear for the next one's)."""
+-    e = np.array([np.cos(line_angle), np.sin(line_angle)])
+-    n = np.array([-e[1], e[0]])
+-    u_out = np.array([np.cos(h_next), np.sin(h_next)])
+-    if u_out @ n < 0:
+-        n = -n                                     # n points along travel, into the next piece
+-    u_in = np.array([np.cos(h_prev), np.sin(h_prev)])
+-    a_in, a_out = _cross_angle(u_in, e, n), _cross_angle(u_out, e, n)
+-    if abs(np.degrees(a_out - a_in)) > max_kink_deg:
++def join_shears(p0, line_angle: float, h_prev: float, h_next: float,
++                g_prev: float, g_next: float,
++                reach_prev_m: float, reach_next_m: float,
++                max_kink_deg: float = 60.0,
++                min_normal_component: float = 0.2):
++    """Return both shear transforms, or ``(None, None)`` for an unsafe join.
++
++    Reach arguments are nominal source-road arclengths, not normal to the
++    grid boundary. Use :func:`assess_join` to inspect predicted offsets.
++    """
++    assessment = assess_join(line_angle, h_prev, h_next, g_prev, g_next,
++                             reach_prev_m, reach_next_m, max_kink_deg,
++                             min_normal_component)
++    if assessment is None:
+         return None, None
+-    a_mid = (a_in + a_out) / 2
+-    # direction (cos a, sin a) in (n, e); a shear x_e += A d (d along the side's
+-    # normal) maps it to (cos a, sin a + A cos a [n-dir sign]) -> tan a' = tan a + A s
+-    # next side: normal n, d grows along travel
+-    A_next = np.tan(a_mid) - np.tan(a_out)
+-    # previous side: normal -n, d grows against travel: x_e += A d, d = -(x . n)
+-    A_prev = -(np.tan(a_mid) - np.tan(a_in))
+-    g_mid = (g_prev + g_next) / 2
+-    # slope along travel; d per metre of travel = cos a (next) / -cos a (prev side)
+-    Az_next = (g_mid - g_next) / max(np.cos(a_out), 0.2)
+-    Az_prev = -(g_mid - g_prev) / max(np.cos(a_in), 0.2)
++
++    e = np.array([np.cos(line_angle), np.sin(line_angle)], dtype=np.float64)
++    n = np.array([-e[1], e[0]], dtype=np.float64)
++    if np.array([np.cos(h_next), np.sin(h_next)]) @ n < 0:
++        n = -n
+     p0 = np.asarray(p0, np.float64)[:2]
+-    return (Shear(p0, e, -n, A_prev, Az_prev, D_prev), Shear(p0, e, n, A_next, Az_next, D_next))
++    if p0.shape != (2,) or not np.all(np.isfinite(p0)):
++        return None, None
++    return (
++        Shear(p0, e, -n, assessment.A_prev, assessment.Az_prev, assessment.D_prev_normal),
++        Shear(p0, e, n, assessment.A_next, assessment.Az_next, assessment.D_next_normal),
++    )
+diff --git a/stagegen/tiles.py b/stagegen/tiles.py
+index a456dc5..a70d28f 100644
+--- a/stagegen/tiles.py
++++ b/stagegen/tiles.py
+@@ -1,4 +1,4 @@
+-﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
++# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+ # SPDX-License-Identifier: MIT
+ 
+ """Tile-aligned recombination for base-game (World Partition) stages.
+@@ -147,7 +147,8 @@ class TileSearchConfig:
+     # and grade steps become gentle bends; 0 = off (rigid joins as before)
+     smooth_kink_deg: float = 45.0
+     smooth_grade: float = 0.12
+-    smooth_reach: float = 120.0    # m either side of a join (at most 40 % of the piece)
++    smooth_reach: float = 120.0    # m along each road, capped at 40 % of that piece
++    min_boundary_crossing_cos: float = 0.2  # reject nearly parallel tile-boundary crossings
+     max_width_mismatch: float = 2.0
+     clearance: float = 95.0        # min distance between roads of non-adjacent pieces (m)
+     beam_width: int = 128
+@@ -248,11 +249,17 @@ def join_shears(best: TState, cfg: TileSearchConfig) -> tuple[list[list], dict]:
+         D_a = min(cfg.smooth_reach, 0.4 * a.rng.seg.length)
+         D_b = min(cfg.smooth_reach, 0.4 * b.rng.seg.length)
+         sa, sb = _js(a.exit_p, a.exit_line, a.exit_heading, b.entry_heading, a.exit_grade, b.entry_grade,
+-                     D_a, D_b, max_kink_deg=180.0)
+-        if sa is not None:
+-            out[k - 1].append(sa)
+-            out[k].append(sb)
+-            smoothed[k] = max(D_a, D_b)
++                     D_a, D_b, max_kink_deg=max(cfg.max_kink_deg, cfg.smooth_kink_deg),
++                     min_normal_component=cfg.min_boundary_crossing_cos)
++        if sa is None or sb is None:
++            raise ValueError(
++                f"join {k - 1}->{k} cannot be safely smoothed: kink {kink:.1f} deg "
++                f"or boundary crossing is too oblique (minimum normal component "
++                f"{cfg.min_boundary_crossing_cos:.2f})"
++            )
++        out[k - 1].append(sa)
++        out[k].append(sb)
++        smoothed[k] = max(D_a, D_b)
+     return out, smoothed
+ 
+ 
+@@ -285,12 +292,24 @@ def _place(rng: Range, rev: bool, cuts: list[Cut], st: TState, cfg: TileSearchCo
+         if best is None or abs(kink) < abs(best[1]):
+             best = (yaw, kink)
+     yaw, kink = best
+-    if abs(np.degrees(kink)) > (max(cfg.max_kink_deg, cfg.smooth_kink_deg) if smooth else cfg.max_kink_deg):
++    kink_limit = max(cfg.max_kink_deg, cfg.smooth_kink_deg) if smooth else cfg.max_kink_deg
++    if abs(np.degrees(kink)) > kink_limit:
+         return None
++    g_in = -ent.grade if rev else ent.grade
++    if cfg.smooth_kink_deg > 0 and (abs(np.degrees(kink)) >= 3.0 or abs(g_in - st.exit_grade) >= 0.02):
++        from .joins import assess_join
++        reach_prev = min(cfg.smooth_reach, 0.4 * st.rng.seg.length)
++        reach_next = min(cfg.smooth_reach, 0.4 * rng.seg.length)
++        assessment = assess_join(
++            st.exit_line, st.exit_heading, h_in + yaw, st.exit_grade, g_in,
++            reach_prev, reach_next, max_kink_deg=kink_limit,
++            min_normal_component=cfg.min_boundary_crossing_cos,
++        )
++        if assessment is None:
++            return None
+     R = rot_z(yaw)
+     trans = st.exit_p - R @ ent.p
+     pts = rng.seg.points(rev) @ R.T + trans
+-    g_in = -ent.grade if rev else ent.grade
+     return pts, yaw, trans, kink, g_in, ent, ext
+ 
+ 
+@@ -336,10 +355,12 @@ def parse_sequence(text: str) -> list[tuple[int, int, bool]]:
+ 
+ def sequence_state(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: TileSearchConfig,
+                    seq: list[tuple[int, int, bool]]) -> tuple[TState, list[str]]:
+-    """The layout for a given piece sequence (instead of the search). Hard
+-    errors raise ValueError (unknown piece, wrong ends, too many uses, pieces
+-    overlapping); soft limits (kink, grade, width, clearance) come back as
+-    warnings."""
++    """The layout for a given piece sequence (instead of the search).
++
++    Geometric join constraints are hard errors; only non-adjacent proximity is
++    reported as a warning because the final terrain and object footprints are
++    needed to determine whether that overlap is actually harmful.
++    """
+     by_ab = {(r.a, r.b): r for r in ranges}
+     last = len(cuts) - 1
+     warns = []
+@@ -375,16 +396,25 @@ def sequence_state(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg
+             raise ValueError("sequence: the finish piece's tiles are already used (it must be their first use)")
+         placed = _place(r, rev, cuts, st, cfg, smooth=True)
+         if placed is None:
+-            # _place refuses kinks over the limit: place anyway, warn
+-            loose = TileSearchConfig(**{**cfg.__dict__, "max_kink_deg": 180.0})
+-            placed = _place(r, rev, cuts, st, loose)
+-            warns.append(f"{a}-{b}{'r' if rev else ''}: kink {abs(np.degrees(placed[3])):.0f} deg at the join "
+-                         f"(smoothed up to {max(cfg.max_kink_deg, cfg.smooth_kink_deg):.0f}; this one stays sharp)")
++            raise ValueError(
++                f"sequence: {a}-{b}{'r' if rev else ''} cannot join within the configured "
++                f"{max(cfg.max_kink_deg, cfg.smooth_kink_deg):.0f} degree limit or the "
++                "boundary-crossing conditioning limit; choose a more compatible section"
++            )
+         pts, yaw, trans, kink, g_in, ent, ext = placed
+-        if abs(g_in - st.exit_grade) > max(cfg.max_grade_mismatch, cfg.smooth_grade):
+-            warns.append(f"{a}-{b}{'r' if rev else ''}: gradient step {abs(g_in - st.exit_grade) * 100:.0f} % at the join")
++        grade_limit = max(cfg.max_grade_mismatch, cfg.smooth_grade) if cfg.smooth_kink_deg > 0 else cfg.max_grade_mismatch
++        if abs(g_in - st.exit_grade) > grade_limit:
++            raise ValueError(
++                f"sequence: {a}-{b}{'r' if rev else ''} has a "
++                f"{abs(g_in - st.exit_grade) * 100:.1f}% grade discontinuity, above "
++                f"the configured {grade_limit * 100:.1f}% limit"
++            )
+         if abs(ent.width - st.exit_width) > cfg.max_width_mismatch:
+-            warns.append(f"{a}-{b}{'r' if rev else ''}: road width step {abs(ent.width - st.exit_width):.1f} m")
++            raise ValueError(
++                f"sequence: {a}-{b}{'r' if rev else ''} changes road width by "
++                f"{abs(ent.width - st.exit_width):.1f} m, above the configured "
++                f"{cfg.max_width_mismatch:.1f} m limit"
++            )
+         cxy = _coarse(pts, cfg)
+         if _too_close(st, cxy, cfg):
+             warns.append(f"{a}-{b}{'r' if rev else ''}: comes within {cfg.clearance:.0f} m of an earlier piece "
+diff --git a/tests/test_baked_shapes.py b/tests/test_baked_shapes.py
+new file mode 100644
+index 0000000..a14ed4c
+--- /dev/null
++++ b/tests/test_baked_shapes.py
+@@ -0,0 +1,80 @@
++import struct
++from types import SimpleNamespace
++
++from stagegen.build.writers import (
++    BakedFull, _hdr, inspect_baked_shapes, without_baked_shapes,
++)
++
++
++def _shape_mid_one_box():
++    # One shape entry with one default-layout box primitive, no sphere/capsule,
++    # no physical-material ref and an empty soft path. Top-level field 2 empty.
++    box_fields = _hdr(10) + bytes(range(75))
++    entry = (
++        _hdr(5) + struct.pack("<I", 1) + box_fields +
++        struct.pack("<II", 0, 0) + struct.pack("<i", 0) +
++        struct.pack("<IIIII", 0, 0, 0, 0, 0)
++    )
++    return struct.pack("<I", 1) + entry + struct.pack("<I", 0)
++
++
++def _shape_group_rest():
++    # List 1 empty. List 2: collision key 12 refers to shape entry range [0,1).
++    list1 = struct.pack("<i", 0)
++    list2 = (
++        struct.pack("<iii", 1, 12, 0) + b"\x00\x03" +
++        struct.pack("<ii", 0, 1) + _hdr(2) + struct.pack("<ii", 0, 1)
++    )
++    return list1 + list2 + bytes(4)
++
++
++def _bf(mid, rest=None):
++    # A BakedFull carrying no meshes; the test focuses on the shape arrays/lists.
++    return BakedFull(b"top", b"transform", [], mid, [], rest or struct.pack("<III", 0, 0, 0), set())
++
++
++def test_inspect_primitive_shape_inventory_and_samples():
++    pk = SimpleNamespace(names=["None"], imported_package_names=lambda: [])
++    info = inspect_baked_shapes(pk, _bf(_shape_mid_one_box(), _shape_group_rest()))
++    assert info["entry_count"] == 1
++    assert info["primitive_counts"] == {"box": 1, "sphere": 0, "capsule": 0}
++    assert info["entries"][0]["material"] == "none"
++    assert info["entries"][0]["groups"] == [12]
++    assert info["primitive_raw_samples_hex"]["box"][0]["0"] == bytes(range(24)).hex()
++
++
++def test_strip_shapes_preserves_triangle_groups_and_clears_shape_groups():
++    original = _bf(_shape_mid_one_box(), _shape_group_rest())
++    stripped, count = without_baked_shapes(original)
++    assert count == 1
++    assert stripped.mid == struct.pack("<II", 0, 0)
++    # Empty list 1 + empty list 2 + required trailer.
++    assert stripped.rest == struct.pack("<III", 0, 0, 0)
++    assert stripped.meshes == original.meshes
++    assert stripped.list0_hdr == original.list0_hdr
++
++
++def test_point_to_triangle_distance_projects_to_face_and_edges():
++    import numpy as np
++    from stagegen.inspect_collision import _closest_points_on_triangles
++
++    tri = np.array([[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]])
++    # Point above the face projects vertically onto its interior.
++    p_face = np.array([[0.5, 0.5, 3.0]])
++    q_face = _closest_points_on_triangles(p_face, tri)
++    np.testing.assert_allclose(q_face, [[0.5, 0.5, 0.0]], atol=1e-8)
++
++    # Point outside the triangle uses the nearest edge segment.
++    p_edge = np.array([[2.0, 2.0, 0.0]])
++    q_edge = _closest_points_on_triangles(p_edge, tri)
++    np.testing.assert_allclose(q_edge, [[1.0, 1.0, 0.0]], atol=1e-8)
++
++
++def test_point_to_degenerate_triangle_falls_back_to_edges():
++    import numpy as np
++    from stagegen.inspect_collision import _closest_points_on_triangles
++
++    tri = np.array([[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]]])
++    point = np.array([[1.0, 1.0, 0.0]])
++    closest = _closest_points_on_triangles(point, tri)
++    np.testing.assert_allclose(closest, [[1.0, 0.0, 0.0]], atol=1e-8)
+diff --git a/tests/test_gamefs_stagegen.py b/tests/test_gamefs_stagegen.py
+new file mode 100644
+index 0000000..beaefca
+--- /dev/null
++++ b/tests/test_gamefs_stagegen.py
+@@ -0,0 +1,39 @@
++from stagegen.extract import iostore
++
++
++def test_gamefs_stagegen_containers_are_explicit_opt_in(monkeypatch):
++    seen = []
++
++    class FakeContainer:
++        def __init__(self, path):
++            seen.append(path)
++            self.files = {}
++            self.chunk_index = {}
++
++    def fake_glob(pattern):
++        if pattern.endswith("~mods/*.utoc"):
++            return [
++                r"C:\\Game\\Paks\\~mods\\third-party.utoc",
++                r"C:\\Game\\Paks\\~mods\\pakchunk99-Test_Stagegen_9_P.utoc",
++            ]
++        if pattern.endswith("*.utoc"):
++            return [r"C:\\Game\\Paks\\pakchunk0-Windows.utoc"]
++        return []
++
++    monkeypatch.setattr(iostore.glob, "glob", fake_glob)
++    monkeypatch.setattr(iostore, "Container", FakeContainer)
++
++    iostore.GameFS(r"C:\\Game\\Paks")
++    assert len(seen) == 1
++    assert "Stagegen" not in seen[0]
++
++    seen.clear()
++    iostore.GameFS(r"C:\\Game\\Paks", include_mods=True)
++    assert len(seen) == 2
++    assert all("Stagegen" not in p for p in seen)
++
++    seen.clear()
++    iostore.GameFS(r"C:\\Game\\Paks", include_stagegen=True)
++    assert len(seen) == 2
++    assert any("Stagegen" in p for p in seen)
++    assert all("third-party" not in p for p in seen)
+diff --git a/tests/test_join_math.py b/tests/test_join_math.py
+new file mode 100644
+index 0000000..d375bd6
+--- /dev/null
++++ b/tests/test_join_math.py
+@@ -0,0 +1,103 @@
++import numpy as np
++import pytest
++
++from stagegen.joins import assess_join, join_shears
++
++
++def test_join_assessment_limits_normal_projection_and_reports_offsets():
++    angle = 0.0
++    h_in = np.deg2rad(80)
++    h_out = np.deg2rad(100)
++    a = assess_join(angle, h_in, h_out, 0.10, 0.0, 100.0, 100.0,
++                    max_kink_deg=30, min_normal_component=0.2)
++    assert a is not None
++    assert abs(a.kink_deg - 20.0) < 1e-8
++    assert abs(a.D_prev_normal / a.normal_in - 100.0) < 1e-8
++    assert abs(a.D_next_normal / a.normal_out - 100.0) < 1e-8
++    assert a.max_boundary_parallel_shift_m >= 0
++    assert a.max_vertical_shift_m > 0
++
++
++def test_nearly_parallel_boundary_crossing_is_rejected_not_clamped():
++    # With a horizontal grid line and a road travelling along it, the normal
++    # component is zero and the shear equations are ill-conditioned.
++    assert assess_join(0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 100.0) is None
++    a, b = join_shears([0, 0], 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 100.0)
++    assert a is None and b is None
++
++
++def test_join_shear_maps_both_sides_to_same_boundary_tangent_and_grade():
++    line = 0.0
++    h_in, h_out = np.deg2rad(80), np.deg2rad(100)
++    g_in, g_out = 0.10, 0.0
++    prev, nxt = join_shears([0, 0], line, h_in, h_out, g_in, g_out,
++                            100.0, 100.0, max_kink_deg=30)
++    assert prev is not None and nxt is not None
++
++    eps = 1e-3
++    u_in = np.array([np.cos(h_in), np.sin(h_in)])
++    u_out = np.array([np.cos(h_out), np.sin(h_out)])
++    before = np.array([[-eps * u_in[0], -eps * u_in[1], -eps * g_in], [0, 0, 0]])
++    after = np.array([[0, 0, 0], [eps * u_out[0], eps * u_out[1], eps * g_out]])
++    mapped_before = prev.apply(before)
++    mapped_after = nxt.apply(after)
++
++    t_in = (mapped_before[1] - mapped_before[0]) / eps
++    t_out = (mapped_after[1] - mapped_after[0]) / eps
++    heading_target = np.deg2rad(90)
++    assert abs(np.arctan2(t_in[1], t_in[0]) - heading_target) < 1.5e-3
++    assert abs(np.arctan2(t_out[1], t_out[0]) - heading_target) < 1.5e-3
++    assert abs(t_in[2] / np.hypot(t_in[0], t_in[1]) - 0.05) < 1.5e-3
++    assert abs(t_out[2] / np.hypot(t_out[0], t_out[1]) - 0.05) < 1.5e-3
++
++
++def test_join_rejects_heading_kink_over_configured_limit():
++    assert assess_join(np.pi / 2, np.deg2rad(60), np.deg2rad(120),
++                       0, 0, 100, 100, max_kink_deg=30) is None
++
++
++def test_join_grade_is_matched_after_horizontal_shear_changes_speed():
++    # Exercise asymmetric crossing angles: the horizontal shear changes
++    # horizontal speed, so checking dz per source-distance is insufficient.
++    rng = np.random.default_rng(1847)
++    checked = 0
++    for _ in range(500):
++        line = rng.uniform(-np.pi, np.pi)
++        e = np.array([np.cos(line), np.sin(line)])
++        n = np.array([-e[1], e[0]])
++        if rng.random() < 0.5:
++            n = -n
++        a_in, a_out = rng.uniform(-1.25, 1.25, size=2)
++        u_in = np.cos(a_in) * n + np.sin(a_in) * e
++        u_out = np.cos(a_out) * n + np.sin(a_out) * e
++        h_in = np.arctan2(u_in[1], u_in[0])
++        h_out = np.arctan2(u_out[1], u_out[0])
++        g_in, g_out = rng.uniform(-0.18, 0.18, size=2)
++        prev, nxt = join_shears([0.0, 0.0], line, h_in, h_out,
++                                g_in, g_out, 100.0, 100.0,
++                                max_kink_deg=160.0, min_normal_component=0.2)
++        if prev is None:
++            continue
++
++        target_a = (a_in + a_out) * 0.5
++        target_dir = np.sin(target_a) * e + np.cos(target_a) * n
++        eps = 1e-5
++        before = np.array([[-eps * u_in[0], -eps * u_in[1], -eps * g_in],
++                           [0.0, 0.0, 0.0]])
++        after = np.array([[0.0, 0.0, 0.0],
++                          [eps * u_out[0], eps * u_out[1], eps * g_out]])
++        t_in = (prev.apply(before)[1] - prev.apply(before)[0]) / eps
++        t_out = (nxt.apply(after)[1] - nxt.apply(after)[0]) / eps
++
++        # Both transformed paths must have the chosen heading and mean grade
++        # when grade is measured against transformed horizontal arclength.
++        for tangent in (t_in, t_out):
++            heading_error = np.arctan2(
++                target_dir[0] * tangent[1] - target_dir[1] * tangent[0],
++                target_dir @ tangent[:2],
++            )
++            grade_after = tangent[2] / np.linalg.norm(tangent[:2])
++            assert abs(heading_error) < 2e-5
++            assert grade_after == pytest.approx((g_in + g_out) * 0.5, abs=2e-5)
++        checked += 1
++    assert checked >= 100
+diff --git a/tests/test_splines.py b/tests/test_splines.py
+new file mode 100644
+index 0000000..4ef4f4e
+--- /dev/null
++++ b/tests/test_splines.py
+@@ -0,0 +1,133 @@
++import numpy as np
++import pytest
++
++from stagegen.extract.splines import (
++    CIM_CONSTANT,
++    CIM_CURVE_USER,
++    CIM_LINEAR,
++    SplineCurve,
++    sample_spline,
++)
++
++
++def curve(positions, keys=None, leave=None, arrive=None, modes=None,
++          is_looped=False, loop_key_offset=0.0):
++    positions = np.asarray(positions, dtype=np.float64)
++    n = len(positions)
++    return SplineCurve(
++        np.arange(n, dtype=np.float64) if keys is None else np.asarray(keys, dtype=np.float64),
++        positions,
++        np.zeros((n, 3), dtype=np.float64) if arrive is None else np.asarray(arrive, dtype=np.float64),
++        np.zeros((n, 3), dtype=np.float64) if leave is None else np.asarray(leave, dtype=np.float64),
++        np.full(n, CIM_LINEAR, dtype=np.uint8) if modes is None else np.asarray(modes, dtype=np.uint8),
++        is_looped,
++        loop_key_offset,
++    )
++
++
++def test_linear_interpolation_ignores_tangents_and_respects_step():
++    c = curve([[0, 0, 0], [10, 0, 0]], leave=[[100, 0, 0], [0, 0, 0]])
++    sampled = sample_spline(c, step_cm=3)
++    assert np.allclose(sampled[[0, -1]], [[0, 0, 0], [10, 0, 0]])
++    assert np.all(np.diff(sampled[:, 0]) <= 3.0 + 1e-9)
++    assert np.allclose(sampled[:, 1:], 0)
++
++
++def test_cubic_tangents_are_scaled_by_nonuniform_input_key_delta():
++    c = curve(
++        [[0, 0, 0], [10, 0, 0]],
++        keys=[2, 4],
++        leave=[[1, 0, 0], [0, 0, 0]],
++        arrive=[[0, 0, 0], [0, 0, 0]],
++        modes=[CIM_CURVE_USER, CIM_CURVE_USER],
++    )
++    sampled = sample_spline(c, step_cm=2, tolerance_cm=0.1)
++    # The de Casteljau split includes t=0.5. Hermite with M0=LeaveTangent*2
++    # evaluates to 5.25 cm; omitting the input-key delta would give 5.125 cm.
++    midpoint = sampled[np.argmin(np.abs(sampled[:, 0] - 5.25))]
++    assert np.allclose(midpoint, [5.25, 0, 0], atol=1e-8)
++
++
++def test_loop_key_offset_is_the_final_segment_interval_not_total_curve_span():
++    c = curve(
++        [[0, 0, 0], [10, 0, 0]],
++        keys=[5, 10],
++        modes=[CIM_LINEAR, CIM_LINEAR],
++        is_looped=True,
++        loop_key_offset=2.0,
++    )
++    sampled = sample_spline(c, step_cm=2)
++    assert np.allclose(sampled[0], sampled[-1])
++    assert np.allclose(sampled[-1], [0, 0, 0])
++
++
++def test_discontinuous_constant_curve_is_rejected_not_turned_into_a_ramp():
++    c = curve([[0, 0, 0], [10, 0, 0]], modes=[CIM_CONSTANT, CIM_LINEAR])
++    with pytest.raises(ValueError, match="constant spline segment 0 is discontinuous"):
++        sample_spline(c)
++
++
++def test_equal_value_constant_segment_is_safe_and_deduplicated():
++    c = curve([[0, 0, 0], [0, 0, 0], [10, 0, 0]], modes=[CIM_CONSTANT, CIM_LINEAR, CIM_LINEAR])
++    sampled = sample_spline(c, step_cm=5)
++    assert np.allclose(sampled[0], [0, 0, 0])
++    assert np.allclose(sampled[-1], [10, 0, 0])
++    assert not np.any(np.linalg.norm(np.diff(sampled, axis=0), axis=1) == 0)
++
++
++def test_bad_shapes_and_nonmonotonic_keys_are_rejected():
++    bad = SplineCurve(
++        np.array([0, 0]), np.array([[0, 0, 0], [1, 0, 0]]),
++        np.zeros((2, 3)), np.zeros((2, 3)), np.array([0, 0], dtype=np.uint8)
++    )
++    with pytest.raises(ValueError, match="strictly increasing"):
++        sample_spline(bad)
++
++    bad_shape = SplineCurve(
++        np.array([0]), np.array([[0, 0, 0]]), np.zeros((1, 3)),
++        np.zeros((1, 3)), np.array([0, 0], dtype=np.uint8)
++    )
++    with pytest.raises(ValueError, match="inconsistent shapes"):
++        sample_spline(bad_shape)
++
++
++def _header(indices):
++    # Test-only encoder for one contiguous unversioned-property fragment.
++    indices = list(indices)
++    assert indices == list(range(indices[0], indices[-1] + 1))
++    skip = indices[0]
++    count = len(indices)
++    return __import__("struct").pack("<H", skip | (count << 9) | (1 << 8))
++
++
++def test_reader_preserves_curve_modes_loop_flag_and_loop_interval():
++    import struct
++    from types import SimpleNamespace
++    from stagegen.extract.splines import read_spline_curve
++
++    data = bytearray()
++    data += _header([2])               # DMSplineComponent: SplineCurves
++    data += _header([0])               # FSplineCurves: Position
++    data += _header([0, 1, 2])         # FInterpCurveVector: Points, bIsLooped, LoopKeyOffset
++    data += struct.pack("<I", 2)
++    point_values = [
++        (1.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), CIM_CURVE_USER),
++        (2.0, (10.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 0.0), CIM_LINEAR),
++    ]
++    for key, pos, arrive, leave, mode in point_values:
++        data += _header([0, 1, 2, 3, 4])
++        data += struct.pack("<f", key)
++        for vec in (pos, arrive, leave):
++            data += struct.pack("<ddd", *vec)
++        data += struct.pack("<B", mode)
++    data += struct.pack("<?f", True, 0.5)
++
++    fake = SimpleNamespace(
++        d=bytes(data),
++        exports=[SimpleNamespace(name="CenterSpline", data_offset=0)],
++    )
++    decoded = read_spline_curve(fake, "CenterSpline")
++    assert decoded.is_looped is True
++    assert decoded.loop_key_offset == pytest.approx(0.5)
++    assert decoded.interp_modes.tolist() == [CIM_CURVE_USER, CIM_LINEAR]
++    assert decoded.input_keys.tolist() == [1.0, 2.0]
+diff --git a/tests/test_tile_join_rules.py b/tests/test_tile_join_rules.py
+new file mode 100644
+index 0000000..f85ed7b
+--- /dev/null
++++ b/tests/test_tile_join_rules.py
+@@ -0,0 +1,43 @@
++import numpy as np
++import pytest
++
++from stagegen.model import Pacenote, Segment, SourceStage
++from stagegen.tiles import Cut, Range, TileSearchConfig, sequence_state
++
++
++def _sequence_fixture(join_line=np.pi / 2, join_heading=np.pi / 2,
++                      join_grade=0.0, join_width=7.0, prev_heading=np.pi / 2):
++    points = np.column_stack((np.arange(376) * 2.0, np.zeros(376), np.zeros(376)))
++    stage = SourceStage("TestStage", "test", "gravel", points,
++                        np.full(len(points), 7.0), [Pacenote(20.0, "3 left")])
++    cuts = [
++        Cut(0.0, np.array([0.0, 0.0, 0.0]), 0.0, np.pi / 2, 0.0, 7.0, "start"),
++        Cut(250.0, np.array([0.0, 250.0, 0.0]), 0.0, prev_heading, 0.0, 7.0, "cross"),
++        Cut(500.0, np.array([500.0, 0.0, 0.0]), join_line, join_heading, join_grade, join_width, "cross"),
++        Cut(750.0, np.array([500.0, 250.0, 0.0]), 0.0, np.pi / 2, 0.0, 7.0, "finish"),
++    ]
++    r0 = Range("TestStage#0-1", 0, 1, frozenset({(0, 0)}), Segment("r0", stage, 0, 125, 2.0))
++    r1 = Range("TestStage#2-3", 2, 3, frozenset({(0, 1)}), Segment("r1", stage, 250, 375, 2.0))
++    cfg = TileSearchConfig(target_length=500.0, min_len=200.0, max_len=300.0,
++                           max_uses=1, smooth_kink_deg=45.0, smooth_grade=0.12)
++    return stage, cuts, [r0, r1], cfg
++
++
++def test_manual_sequence_rejects_kink_beyond_smoothing_limit_without_180_degree_fallback():
++    stage, cuts, ranges, cfg = _sequence_fixture(join_line=np.pi / 2, join_heading=0.0, prev_heading=np.deg2rad(30))
++    with pytest.raises(ValueError, match="cannot join within the configured 45 degree limit"):
++        sequence_state(stage, ranges, cuts, cfg, [(0, 1, False), (2, 3, False)])
++
++
++def test_manual_sequence_rejects_grade_step_above_smoothing_limit():
++    stage, cuts, ranges, cfg = _sequence_fixture(join_line=0.0, join_heading=np.pi / 2,
++                                                join_grade=0.13)
++    with pytest.raises(ValueError, match="grade discontinuity"):
++        sequence_state(stage, ranges, cuts, cfg, [(0, 1, False), (2, 3, False)])
++
++
++def test_manual_sequence_rejects_road_width_step_above_limit():
++    stage, cuts, ranges, cfg = _sequence_fixture(join_line=0.0, join_heading=np.pi / 2,
++                                                join_width=9.1)
++    with pytest.raises(ValueError, match="changes road width"):
++        sequence_state(stage, ranges, cuts, cfg, [(0, 1, False), (2, 3, False)])
