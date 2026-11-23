@@ -26,13 +26,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Confirm this is a branch build
+      - name: Protect the default branch
         shell: pwsh
         run: |
           if ($env:GITHUB_REF -notlike 'refs/heads/*') {
             throw 'Run this workflow from a branch, not a tag.'
           }
-          Write-Host "Building branch $env:GITHUB_REF_NAME"
+          if ($env:GITHUB_REF_NAME -in @('main', 'master')) {
+            throw 'For safety, run this workflow on geometry-foundation (or another feature branch), not main/master.'
+          }
+          Write-Host "Building feature branch $env:GITHUB_REF_NAME"
 
       - name: Apply the selected repository update
         shell: pwsh
@@ -50,6 +53,8 @@ jobs:
           }
 
           $hasInspector = Test-Path 'stagegen/inspect_collision.py'
+          $hasGeometryFoundation = (Test-Path 'tests/test_splines.py') -and (Test-Path 'docs/geometry-road-combination.md')
+
           if (Test-Path $patch) {
             if ($env:UPDATE_KIND -eq 'combined' -and $hasInspector) {
               throw 'The collision inspector already exists. Select geometry-only instead of combined.'
@@ -72,10 +77,10 @@ jobs:
               Write-Host 'The selected patch is already applied; continuing with tests and build.'
             }
           } else {
-            if (-not (Test-Path 'tests/test_splines.py') -or -not (Test-Path 'docs/geometry-road-combination.md')) {
-              throw "Cannot find $patch and the geometry-foundation files are not present. Upload the selected patch to the repository root first."
+            if (-not $hasInspector -or -not $hasGeometryFoundation) {
+              throw "Cannot find $patch and the expected collision-inspector/geometry-foundation source files are not present. Upload the selected patch to the repository root first."
             }
-            Write-Host 'Patch file is absent; geometry-foundation source files are already present.'
+            Write-Host 'Patch file is absent; the selected source updates appear to be already applied.'
           }
 
           if (Test-Path $patch) { Remove-Item $patch -Force }
@@ -120,30 +125,43 @@ jobs:
       - name: Build the standalone Windows GUI (embeds the backend)
         run: cargo build --release --manifest-path gui/Cargo.toml
 
-      - name: Prepare downloadable executables
+      - name: Prepare downloadable executables outside the repository
         shell: pwsh
         run: |
           $guiExe = 'gui/target/release/acr-remixer.exe'
           $backendExe = 'packaging/dist/stagegen-backend.exe'
           if (-not (Test-Path $guiExe)) { throw "Missing GUI executable: $guiExe" }
           if (-not (Test-Path $backendExe)) { throw "Missing backend executable: $backendExe" }
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item $guiExe 'dist/acr-remixer.exe' -Force
-          Copy-Item $backendExe 'dist/stagegen-backend.exe' -Force
-          Get-ChildItem dist | Select-Object Name, Length
+          $artifactDir = Join-Path $env:RUNNER_TEMP 'acr-remixer-dist'
+          New-Item -ItemType Directory -Force $artifactDir | Out-Null
+          Copy-Item $guiExe (Join-Path $artifactDir 'acr-remixer.exe') -Force
+          Copy-Item $backendExe (Join-Path $artifactDir 'stagegen-backend.exe') -Force
+          Get-ChildItem $artifactDir | Select-Object Name, Length
 
-      - name: Commit the updated source to this branch
+      - name: Commit source changes without workflow files or binaries
         shell: pwsh
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+
+          # The combined patch also updates the legacy build-zlib workflow.
+          # GitHub's built-in GITHUB_TOKEN cannot push changes under .github/workflows.
+          # Stage only source, tests and documentation; deliberately exclude all workflows and build output.
+          git add -A -- .gitignore README.md docs gui stagegen tests
+          if ($LASTEXITCODE -ne 0) { throw 'Could not stage the source files.' }
+
+          $staged = @(git diff --cached --name-only)
+          $forbidden = @($staged | Where-Object { $_ -match '^\.github/workflows/' -or $_ -match '^(dist|packaging/dist)/' -or $_ -match '(^|/)target/' })
+          if ($forbidden.Count -gt 0) {
+            throw "Refusing to commit workflow files or build outputs: $($forbidden -join ', ')"
+          }
+
           git diff --cached --quiet
           if ($LASTEXITCODE -ne 0) {
             git commit -m 'Apply ACR geometry foundation update'
             if ($LASTEXITCODE -ne 0) { throw 'Could not create the source-update commit.' }
             git push origin "HEAD:$env:GITHUB_REF_NAME"
-            if ($LASTEXITCODE -ne 0) { throw 'Could not push the source-update commit. Check Actions write permissions and branch protection.' }
+            if ($LASTEXITCODE -ne 0) { throw 'Could not push the source-update commit. Check Actions contents write permission and branch protection.' }
           } else {
             Write-Host 'No source changes to commit; the branch already contains this update.'
           }
@@ -152,6 +170,6 @@ jobs:
         uses: actions/upload-artifact@v7.0.2
         with:
           name: acr-remixer-windows-exe
-          path: dist/*
+          path: ${{ runner.temp }}/acr-remixer-dist/*
           if-no-files-found: error
           retention-days: 14
