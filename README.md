@@ -1,4 +1,4 @@
-﻿# ACR Remixer
+# ACR Remixer
 
 [![Download](https://img.shields.io/badge/download-newest%20build-2ea44f?logo=github)](../../releases)
 [![Latest release](https://img.shields.io/github/v/release/vale981/acr-remixer?label=release)](../../releases/latest)
@@ -212,3 +212,45 @@ is not under the MIT license. Every file's license is recorded following the
 keep their own licenses, e.g. [oozextract](https://crates.io/crates/oozextract)
 (MIT) in `oodle_shim/`, [egui](https://github.com/emilk/egui) (MIT/Apache-2.0),
 numpy and scipy (BSD).
+
+
+## Collision inspection (read-only)
+
+The bundled backend can export a geometry/collision inventory for one stage or
+all discoverable World Partition stages. It writes one JSON report and one CSV
+(mesh-level statistics) per stage. The report includes baked primitive-shape entry counts/material references,
+collision groups, triangle validity, mesh bounds, and a bounded nearest-triangle
+road-to-collision coverage metric. Optional OBJ exports are available for road
+and terrain collision meshes.
+
+```powershell
+.\stagegen-backend.exe inspect-collision --level WalesS4HafrenSouth `
+  --paks "D:\SteamLibrary\steamapps\common\Assetto Corsa Rally\acr\Content\Paks" `
+  --out "$env:USERPROFILE\Desktop\ACR-Collision-Inspection"
+```
+
+Use `--all` instead of `--level WalesS4HafrenSouth` to inspect every discoverable
+original level. To inspect an installed custom stage, add `--include-stagegen`,
+for example `--level SGQ2195E225HafrenSouth --include-stagegen`. Add `--obj` to
+export road and terrain collision meshes for Blender; those files can be large.
+
+```powershell
+.\stagegen-backend.exe inspect-collision --level SGQ2195E225HafrenSouth --include-stagegen `
+  --paks "D:\SteamLibrary\steamapps\common\Assetto Corsa Rally\acr\Content\Paks" `
+  --out "$env:USERPROFILE\Desktop\ACR-Collision-Inspection" --obj
+```
+
+The road-coverage metric calculates point-to-triangle distance for a bounded set
+of nearby triangles, not an exact Unreal physics raycast. Primitive shape
+payloads are inventoried but are not yet semantically decoded. See
+[Collision Inspector notes](docs/collision-inspector.md).
+
+## Road-combination geometry (experimental)
+
+The current geometry-foundation update decodes Unreal spline interpolation more
+faithfully, removes the unrestricted manual-join fallback, rejects poorly
+conditioned tile-boundary crossings, and checks the join-shear grade against the
+transformed horizontal distance. See [Road-combination geometry decisions](docs/geometry-road-combination.md)
+for the mathematics, tests and items deliberately deferred pending real-stage
+measurements. The configured join thresholds remain provisional until validated
+against original ACR stages and in-game driving.

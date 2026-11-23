@@ -1,4 +1,4 @@
-﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
 # SPDX-License-Identifier: MIT
 
 """Tile-aligned recombination for base-game (World Partition) stages.
@@ -147,7 +147,8 @@ class TileSearchConfig:
     # and grade steps become gentle bends; 0 = off (rigid joins as before)
     smooth_kink_deg: float = 45.0
     smooth_grade: float = 0.12
-    smooth_reach: float = 120.0    # m either side of a join (at most 40 % of the piece)
+    smooth_reach: float = 120.0    # m along each road, capped at 40 % of that piece
+    min_boundary_crossing_cos: float = 0.2  # reject nearly parallel tile-boundary crossings
     max_width_mismatch: float = 2.0
     clearance: float = 95.0        # min distance between roads of non-adjacent pieces (m)
     beam_width: int = 128
@@ -248,11 +249,17 @@ def join_shears(best: TState, cfg: TileSearchConfig) -> tuple[list[list], dict]:
         D_a = min(cfg.smooth_reach, 0.4 * a.rng.seg.length)
         D_b = min(cfg.smooth_reach, 0.4 * b.rng.seg.length)
         sa, sb = _js(a.exit_p, a.exit_line, a.exit_heading, b.entry_heading, a.exit_grade, b.entry_grade,
-                     D_a, D_b, max_kink_deg=180.0)
-        if sa is not None:
-            out[k - 1].append(sa)
-            out[k].append(sb)
-            smoothed[k] = max(D_a, D_b)
+                     D_a, D_b, max_kink_deg=max(cfg.max_kink_deg, cfg.smooth_kink_deg),
+                     min_normal_component=cfg.min_boundary_crossing_cos)
+        if sa is None or sb is None:
+            raise ValueError(
+                f"join {k - 1}->{k} cannot be safely smoothed: kink {kink:.1f} deg "
+                f"or boundary crossing is too oblique (minimum normal component "
+                f"{cfg.min_boundary_crossing_cos:.2f})"
+            )
+        out[k - 1].append(sa)
+        out[k].append(sb)
+        smoothed[k] = max(D_a, D_b)
     return out, smoothed
 
 
@@ -285,12 +292,24 @@ def _place(rng: Range, rev: bool, cuts: list[Cut], st: TState, cfg: TileSearchCo
         if best is None or abs(kink) < abs(best[1]):
             best = (yaw, kink)
     yaw, kink = best
-    if abs(np.degrees(kink)) > (max(cfg.max_kink_deg, cfg.smooth_kink_deg) if smooth else cfg.max_kink_deg):
+    kink_limit = max(cfg.max_kink_deg, cfg.smooth_kink_deg) if smooth else cfg.max_kink_deg
+    if abs(np.degrees(kink)) > kink_limit:
         return None
+    g_in = -ent.grade if rev else ent.grade
+    if cfg.smooth_kink_deg > 0 and (abs(np.degrees(kink)) >= 3.0 or abs(g_in - st.exit_grade) >= 0.02):
+        from .joins import assess_join
+        reach_prev = min(cfg.smooth_reach, 0.4 * st.rng.seg.length)
+        reach_next = min(cfg.smooth_reach, 0.4 * rng.seg.length)
+        assessment = assess_join(
+            st.exit_line, st.exit_heading, h_in + yaw, st.exit_grade, g_in,
+            reach_prev, reach_next, max_kink_deg=kink_limit,
+            min_normal_component=cfg.min_boundary_crossing_cos,
+        )
+        if assessment is None:
+            return None
     R = rot_z(yaw)
     trans = st.exit_p - R @ ent.p
     pts = rng.seg.points(rev) @ R.T + trans
-    g_in = -ent.grade if rev else ent.grade
     return pts, yaw, trans, kink, g_in, ent, ext
 
 
@@ -336,10 +355,12 @@ def parse_sequence(text: str) -> list[tuple[int, int, bool]]:
 
 def sequence_state(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: TileSearchConfig,
                    seq: list[tuple[int, int, bool]]) -> tuple[TState, list[str]]:
-    """The layout for a given piece sequence (instead of the search). Hard
-    errors raise ValueError (unknown piece, wrong ends, too many uses, pieces
-    overlapping); soft limits (kink, grade, width, clearance) come back as
-    warnings."""
+    """The layout for a given piece sequence (instead of the search).
+
+    Geometric join constraints are hard errors; only non-adjacent proximity is
+    reported as a warning because the final terrain and object footprints are
+    needed to determine whether that overlap is actually harmful.
+    """
     by_ab = {(r.a, r.b): r for r in ranges}
     last = len(cuts) - 1
     warns = []
@@ -375,16 +396,25 @@ def sequence_state(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg
             raise ValueError("sequence: the finish piece's tiles are already used (it must be their first use)")
         placed = _place(r, rev, cuts, st, cfg, smooth=True)
         if placed is None:
-            # _place refuses kinks over the limit: place anyway, warn
-            loose = TileSearchConfig(**{**cfg.__dict__, "max_kink_deg": 180.0})
-            placed = _place(r, rev, cuts, st, loose)
-            warns.append(f"{a}-{b}{'r' if rev else ''}: kink {abs(np.degrees(placed[3])):.0f} deg at the join "
-                         f"(smoothed up to {max(cfg.max_kink_deg, cfg.smooth_kink_deg):.0f}; this one stays sharp)")
+            raise ValueError(
+                f"sequence: {a}-{b}{'r' if rev else ''} cannot join within the configured "
+                f"{max(cfg.max_kink_deg, cfg.smooth_kink_deg):.0f} degree limit or the "
+                "boundary-crossing conditioning limit; choose a more compatible section"
+            )
         pts, yaw, trans, kink, g_in, ent, ext = placed
-        if abs(g_in - st.exit_grade) > max(cfg.max_grade_mismatch, cfg.smooth_grade):
-            warns.append(f"{a}-{b}{'r' if rev else ''}: gradient step {abs(g_in - st.exit_grade) * 100:.0f} % at the join")
+        grade_limit = max(cfg.max_grade_mismatch, cfg.smooth_grade) if cfg.smooth_kink_deg > 0 else cfg.max_grade_mismatch
+        if abs(g_in - st.exit_grade) > grade_limit:
+            raise ValueError(
+                f"sequence: {a}-{b}{'r' if rev else ''} has a "
+                f"{abs(g_in - st.exit_grade) * 100:.1f}% grade discontinuity, above "
+                f"the configured {grade_limit * 100:.1f}% limit"
+            )
         if abs(ent.width - st.exit_width) > cfg.max_width_mismatch:
-            warns.append(f"{a}-{b}{'r' if rev else ''}: road width step {abs(ent.width - st.exit_width):.1f} m")
+            raise ValueError(
+                f"sequence: {a}-{b}{'r' if rev else ''} changes road width by "
+                f"{abs(ent.width - st.exit_width):.1f} m, above the configured "
+                f"{cfg.max_width_mismatch:.1f} m limit"
+            )
         cxy = _coarse(pts, cfg)
         if _too_close(st, cxy, cfg):
             warns.append(f"{a}-{b}{'r' if rev else ''}: comes within {cfg.clearance:.0f} m of an earlier piece "

@@ -75,6 +75,8 @@ struct Prefs {
     forest: bool,
     grass: bool,
     foliage: bool,
+    /// Diagnostic only: remove baked primitive shapes while retaining triangle collision.
+    debug_no_baked_shapes: bool,
     install: bool,
     launch: bool,
     /// development: run `python -m stagegen.cli` from backend_dir instead of the embedded backend
@@ -109,6 +111,7 @@ impl Default for Prefs {
             forest: true,
             grass: true,
             foliage: true,
+            debug_no_baked_shapes: false,
             install: true,
             launch: false,
             use_python: BACKEND.is_none(),
@@ -142,6 +145,7 @@ fn prefs_with_params(base: &Prefs, params: &serde_json::Value) -> Prefs {
     p.forest = params["forest"].as_bool().unwrap_or(true);
     p.grass = params["grass"].as_bool().unwrap_or(true);
     p.foliage = params["foliage"].as_bool().unwrap_or(true);
+    p.debug_no_baked_shapes = params["debug_no_baked_shapes"].as_bool().unwrap_or(false);
     p
 }
 
@@ -522,6 +526,7 @@ impl App {
         if !p.forest { args.push("--no-forest".into()); }
         if !p.grass { args.push("--no-grass".into()); }
         if !p.foliage { args.push("--no-foliage".into()); }
+        if p.debug_no_baked_shapes { args.push("--debug-no-baked-shapes".into()); }
         // every stage of a batch is installed (each gets its own menu entry); ACR starts after the last
         if p.install { args.push("--install".into()); }
         if last && p.install && p.launch { args.push("--launch".into()); }
@@ -902,6 +907,10 @@ impl eframe::App for App {
                     ui.checkbox(&mut p.forest, "Forest");
                     ui.checkbox(&mut p.grass, "Grass & rocks");
                     ui.checkbox(&mut p.foliage, "Ground grass");
+                });
+                egui::CollapsingHeader::new("Diagnostic (experimental)").show(ui, |ui| {
+                    ui.checkbox(&mut p.debug_no_baked_shapes, "Remove primitive collision shapes")
+                        .on_hover_text("TEST ONLY: removes box/sphere/capsule entries from baked collision while retaining triangle meshes. Some props may lose collision.");
                 });
                 ui.checkbox(&mut p.install, "Install into the game (closes ACR)");
                 ui.add_enabled(p.install, egui::Checkbox::new(&mut p.launch, "Start ACR afterwards"));

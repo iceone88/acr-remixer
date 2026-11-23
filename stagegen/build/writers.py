@@ -1,4 +1,4 @@
-﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
 # SPDX-License-Identifier: MIT
 
 """Serialisers for the three asset kinds a generated stage rewrites:
@@ -200,7 +200,7 @@ class BakedFull:
     covered: set = None        # mesh indices that list 0 references
 
 
-def _skip_shapes(r: Reader):
+def _skip_shapes(r: Reader) -> int:
     n = r.u32()
     for _ in range(n):
         for f in r.header():
@@ -218,6 +218,125 @@ def _skip_shapes(r: Reader):
                 n_ = r.i32(); r.p += n_
             else:
                 raise ValueError(f"unknown shape entry field {f}")
+    return n
+
+
+def _resolve_package_index(pk: Package, ref: int) -> str:
+    """Best-effort resolve an FPackageIndex from BakedData to a package/export name."""
+    if ref < 0:
+        i = -ref - 1
+        try:
+            return pk.imported_package_names()[i]
+        except (IndexError, ValueError):
+            return f"import[{i}]"
+    if ref > 0:
+        i = ref - 1
+        return pk.exports[i].name if i < len(pk.exports) else f"export[{i}]"
+    return "none"
+
+
+def inspect_baked_shapes(pk: Package, bf: BakedFull | None = None) -> dict:
+    """Describe primitive collision shapes and their collision-group references.
+
+    Shape component field payloads are deliberately reported as opaque sizes;
+    their exact semantics are not yet reverse-engineered and must not be guessed.
+    """
+    bf = bf or read_baked_full(pk)
+    r = Reader(bf.mid, 0)
+    n = r.u32()
+    entries = []
+    totals = {"box": 0, "sphere": 0, "capsule": 0}
+    layouts = {"box": [], "sphere": [], "capsule": []}
+    samples = {"box": [], "sphere": [], "capsule": []}
+    names = {0: "box", 1: "sphere", 2: "capsule"}
+    for index in range(n):
+        item = {"index": index, "counts": {"box": 0, "sphere": 0, "capsule": 0},
+                "material_ref": 0, "material": "none", "package": "", "asset": "", "subobject": ""}
+        for f in r.header():
+            if f in (0, 1, 2):
+                count = r.u32()
+                item["counts"][names[f]] = count
+                totals[names[f]] += count
+                schema = SHAPE_SCHEMAS[f]
+                for _ in range(count):
+                    element_fields = {}
+                    sample = {}
+                    for g in r.header():
+                        if g not in schema:
+                            raise ValueError(f"unknown collision shape field {f}.{g}")
+                        size = schema[g]
+                        raw = r.raw(size)
+                        if len(raw) != size:
+                            raise ValueError(f"collision shape field {f}.{g} overruns baked data")
+                        element_fields[str(g)] = size
+                        if len(samples[names[f]]) < 3:
+                            sample[str(g)] = raw.hex()
+                    signature = tuple(sorted(element_fields.items()))
+                    if signature not in layouts[names[f]]:
+                        layouts[names[f]].append(signature)
+                    if sample and len(samples[names[f]]) < 3:
+                        samples[names[f]].append(sample)
+            elif f == 3:
+                item["material_ref"] = r.i32()
+                item["material"] = _resolve_package_index(pk, item["material_ref"])
+            elif f == 4:
+                item["package"] = r.fname(pk.names)
+                item["asset"] = r.fname(pk.names)
+                item["subobject"] = r.fstring()
+            else:
+                raise ValueError(f"unknown shape entry field {f}")
+        entries.append(item)
+    empty_count = r.u32() if r.p + 4 <= len(r.d) else -1
+    if empty_count != 0:
+        raise ValueError(f"BakedDataContainer field 2 expected empty array, got {empty_count}")
+    if r.p != len(r.d):
+        raise ValueError(f"shape inventory consumed {r.p} of {len(r.d)} mid bytes")
+
+    # Top-level index list 2 maps primitive-shape indices to collision groups.
+    rr = Reader(bf.rest, 0)
+    _read_list(rr)  # list 1 is preserved but unrelated to primitive shape indices
+    list2 = _read_list(rr)
+    shape_groups: dict[int, list[int]] = {}
+    for key, _z, _hdr, ranges in list2:
+        for start, count in ranges:
+            for i in range(start, start + count):
+                shape_groups.setdefault(i, []).append(key)
+    for item in entries:
+        item["groups"] = shape_groups.get(item["index"], [])
+    return {
+        "entry_count": n,
+        "primitive_counts": totals,
+        "primitive_field_layouts": {k: [dict(v) for v in values] for k, values in layouts.items()},
+        "primitive_raw_samples_hex": samples,
+        "group_count": len(list2),
+        "group_keys": [g[0] for g in list2],
+        "entries": entries,
+    }
+
+
+def without_baked_shapes(bf: BakedFull) -> tuple[BakedFull, int]:
+    """Return a diagnostic BakedFull with primitive shapes and list-2 refs removed.
+
+    Triangle collision meshes and list-0 mesh-group membership remain intact.
+    This is only for controlled diagnosis; it removes primitive collision used
+    by some props and should not be treated as a normal production setting.
+    """
+    r = Reader(bf.mid, 0)
+    n_shapes = _skip_shapes(r)
+    if r.u32() != 0 or r.p != len(bf.mid):
+        raise ValueError("unexpected BakedDataContainer shape-array suffix")
+
+    rr = Reader(bf.rest, 0)
+    _read_list(rr)
+    list1_end = rr.p
+    _read_list(rr)
+    if rr.p != len(bf.rest) - 4 or bf.rest[-4:] != bytes(4):
+        raise ValueError("unexpected BakedDataContainer index-list suffix")
+    # Preserve list 1 and the trailer, but remove list 2's shape-index groups.
+    rest = bf.rest[:list1_end] + struct.pack("<i", 0) + bf.rest[-4:]
+    stripped = BakedFull(bf.top, bf.transform_bytes, bf.meshes, struct.pack("<II", 0, 0),
+                         bf.list0_hdr, rest, bf.covered)
+    return stripped, n_shapes
 
 
 def _read_list(r: Reader):
@@ -294,7 +413,27 @@ def check_baked(pk: Package) -> str:
     n = len(bf.meshes)
     if bf.covered != set(range(n)):
         raise ValueError(f"mesh index list covers {len(bf.covered)} indices, {n} meshes")
-    return f"{n} meshes all grouped {[k for k, _, _ in bf.list0_hdr]}, lists {len(l1)}/{len(l2)}, exact size"
+    total_triangles = 0
+    for mi, mesh in enumerate(bf.meshes):
+        if mesh.indices.size % 3:
+            raise ValueError(f"collision mesh {mi} has {mesh.indices.size} indices (not divisible by 3)")
+        if not np.isfinite(mesh.vertices).all():
+            raise ValueError(f"collision mesh {mi} has NaN/Inf vertex coordinates")
+        if mesh.indices.size and int(mesh.indices.max()) >= len(mesh.vertices):
+            raise ValueError(f"collision mesh {mi} has an out-of-range vertex index")
+        total_triangles += mesh.indices.size // 3
+    shape_reader = Reader(bf.mid, 0)
+    n_shapes = _skip_shapes(shape_reader)
+    if shape_reader.u32() != 0 or shape_reader.p != len(bf.mid):
+        raise ValueError("invalid BakedDataContainer shape-array suffix")
+    shape_refs = {i for _key, _z, _hdr, ranges in l2 for a, b in ranges for i in range(a, a + b)}
+    invalid_shape_refs = sorted(i for i in shape_refs if i < 0 or i >= n_shapes)
+    if invalid_shape_refs:
+        raise ValueError(f"shape index list references {len(invalid_shape_refs)} out-of-range entries "
+                         f"(shape count {n_shapes}; first {invalid_shape_refs[:8]})")
+    return (f"{n} meshes all grouped {[k for k, _, _ in bf.list0_hdr]}, "
+            f"lists {len(l1)}/{len(l2)}, {n_shapes} primitive shape entries "
+            f"({len(shape_refs)} indexed), {total_triangles} triangles finite/in-range, exact size")
 
 
 def _runs(idx: list[int]) -> list[tuple[int, int]]:

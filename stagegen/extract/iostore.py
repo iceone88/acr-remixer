@@ -196,12 +196,17 @@ class Container:
 class GameFS:
     """All containers of an install, base game first, mods last (mods override)."""
 
-    def __init__(self, paks_dir: str, include_mods: bool = False):
+    def __init__(self, paks_dir: str, include_mods: bool = False,
+                 include_stagegen: bool = False):
         paths = sorted(glob.glob(os.path.join(paks_dir, "*.utoc")))
+        mod_paths = sorted(glob.glob(os.path.join(paks_dir, "~mods", "*.utoc")))
         if include_mods:
-            # never read our own generated containers back as source data
-            paths += sorted(p for p in glob.glob(os.path.join(paks_dir, "~mods", "*.utoc"))
-                            if "_Stagegen_" not in os.path.basename(p))
+            # Normal third-party/user mods, excluding our own generated outputs.
+            paths += [p for p in mod_paths if "_Stagegen_" not in os.path.basename(p)]
+        if include_stagegen:
+            # Explicit forensic opt-in: read Remixer outputs to compare them
+            # against the unmodified source stage. Never enabled by the builder.
+            paths += [p for p in mod_paths if "_Stagegen_" in os.path.basename(p)]
         self.containers = [Container(p) for p in paths]
         self.index: dict[str, tuple[Container, int]] = {}
         self.by_chunk: dict[bytes, tuple[Container, int]] = {}

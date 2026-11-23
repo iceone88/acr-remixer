@@ -96,6 +96,7 @@ class WPConfig:
     debug_skip_kinds: tuple = ()         # test builds: actor kinds left unmoved
     debug_no_backdrop: bool = False     # test builds: hide the coarse backdrop terrain entirely
     debug_no_clip: bool = False         # test builds: keep tile/backdrop meshes unclipped
+    debug_no_baked_shapes: bool = False # diagnostic: remove primitive shapes, retain triangle collision
     debug_offset_zero: bool = False      # test builds: build on top of the original map (piece 0 stays put)
     debug_offset: tuple | None = None    # test builds: explicit placement offset (m)
 
@@ -496,6 +497,18 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
     # that owns most of them, clipped to those stretches.
     bpk = Package(fs.read(ws.baked))
     bf = W.read_baked_full(bpk)
+    shape_info = W.inspect_baked_shapes(bpk, bf)
+    if cfg.debug_no_baked_shapes:
+        bf, removed_shapes = W.without_baked_shapes(bf)
+        rep.checks.append(
+            f"DIAGNOSTIC: removed {removed_shapes} baked primitive-shape entries "
+            f"({shape_info['primitive_counts']}); triangle collision meshes retained"
+        )
+    elif shape_info["entry_count"]:
+        rep.checks.append(
+            f"collision audit: {shape_info['entry_count']} primitive-shape entries "
+            f"({shape_info['primitive_counts']}) are preserved verbatim; their transforms are not rebuilt"
+        )
     meshes = bf.meshes
     tile_v = np.vstack([m.vertices[::4, [0, 2, 1]] for m in meshes
                         if re.search(rb"Track\d{4}", m.soft_sub) and len(m.vertices)])

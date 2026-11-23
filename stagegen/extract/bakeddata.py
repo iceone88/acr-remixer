@@ -70,9 +70,17 @@ def _array(r: Reader, dtype, width=1):
 
 
 def _material_name(pk: Package, idx: int) -> str:
-    # Imports are FPackageObjectIndex hashes; the name map lists material
-    # names in import order, so keep the raw index as a fallback label.
-    return f"import{-idx - 1}" if idx < 0 else f"export{idx - 1}" if idx > 0 else "none"
+    """Resolve the baked material FPackageIndex to its imported package name."""
+    if idx < 0:
+        i = -idx - 1
+        try:
+            return pk.imported_package_names()[i]
+        except (IndexError, ValueError):
+            return f"import[{i}]"
+    if idx > 0:
+        i = idx - 1
+        return pk.exports[i].name if i < len(pk.exports) else f"export[{i}]"
+    return "none"
 
 
 def read_baked(pk: Package) -> list[BakedMesh]:

@@ -1,4 +1,4 @@
-﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
 # SPDX-License-Identifier: MIT
 
 """acr-stagegen command line.
@@ -42,6 +42,26 @@ def _list(a) -> int:
         comp = "compressed" if any(b.method for b in c.blocks[:1]) else "uncompressed"
         print(f"{os.path.basename(lv)[:-5]:40s} {os.path.basename(c.utoc):34s} {comp}")
     return 0
+
+
+def _inspect_collision(a) -> int:
+    from .extract.iostore import GameFS
+    from .extract.real import DEFAULT_PAKS, find_levels
+    from .inspect_collision import inspect_levels
+
+    paks = os.path.normpath(a.paks or DEFAULT_PAKS)
+    # Stagegen output is excluded from normal source loading to prevent the
+    # generator feeding its own generated stages back into its source pool.
+    # The inspector opts in explicitly so users can inspect installed outputs.
+    fs = GameFS(paks, include_stagegen=a.include_stagegen)
+    if a.all:
+        levels = [os.path.basename(p)[:-5] for p in find_levels(fs)]
+    else:
+        levels = [a.level]
+    os.makedirs(a.out, exist_ok=True)
+    result = inspect_levels(fs, levels, a.out, a.corridor, a.obj)
+    print(f"collision inspection finished: {result['report_count']} stage(s), {len(result['errors'])} error(s)")
+    return 0 if result["report_count"] else 1
 
 
 # Single-level builds: shorter segments so a 6-7 km stage still recombines,
@@ -183,7 +203,9 @@ def _build_wp(a, paks: str) -> int:
     import ast
     import dataclasses
     from .build.wp import WPConfig
-    cfg = WPConfig(debug_spawn_s=a.spawn_at, debug_no_clip=a.no_clip, debug_offset_zero=a.offset_zero,
+    cfg = WPConfig(debug_spawn_s=a.spawn_at, debug_no_clip=a.no_clip,
+                   debug_no_baked_shapes=getattr(a, "debug_no_baked_shapes", False),
+                   debug_offset_zero=a.offset_zero,
                    debug_offset=None if a.offset is None else tuple(float(v) for v in a.offset.split(',')))
     if not getattr(a, "override", False):
         # its own level and menu entry next to the original stage
@@ -195,7 +217,8 @@ def _build_wp(a, paks: str) -> int:
         cfg.build_params = {"level": a.level, "length": a.length, "seed": a.seed,
                             "max_uses": getattr(a, "max_uses", 1), "sequence": getattr(a, "sequence", None) or "",
                             "forest": not getattr(a, "no_forest", False), "grass": not getattr(a, "no_grass", False),
-                            "foliage": not getattr(a, "no_foliage", False)}
+                            "foliage": not getattr(a, "no_foliage", False),
+                            "debug_no_baked_shapes": bool(getattr(a, "debug_no_baked_shapes", False))}
     if getattr(a, "no_forest", False):
         cfg.forest = "hide"
     if getattr(a, "no_grass", False):
@@ -391,6 +414,16 @@ def main(argv=None):
     g.add_argument("--out", default="out")
     ls = sub.add_parser("list", help="list stage levels found in the install")
     ls.add_argument("--paks")
+    ci = sub.add_parser("inspect-collision", help="export collision/road geometry inventory for one or all stages")
+    ci_src = ci.add_mutually_exclusive_group(required=True)
+    ci_src.add_argument("--level", help="stage level, e.g. WalesS4HafrenSouth")
+    ci_src.add_argument("--all", action="store_true", help="inspect every discoverable level")
+    ci.add_argument("--paks", help="path to acr/Content/Paks")
+    ci.add_argument("--include-stagegen", action="store_true",
+                    help="also inspect installed ACR Remixer *_Stagegen_* containers")
+    ci.add_argument("--out", default="collision-inspection", help="report output directory")
+    ci.add_argument("--corridor", type=float, default=30.0, help="route proximity corridor in metres")
+    ci.add_argument("--obj", action="store_true", help="also export road/terrain collision meshes as OBJ (can be large)")
     b = sub.add_parser("build", help="generate a stage from one level and build an installable mod container")
     b.add_argument("--level", default="WrcgEsSS1", help="stage level to recombine and replace")
     b.add_argument("--paks")
@@ -411,6 +444,8 @@ def main(argv=None):
     b.add_argument("--install", action="store_true", help="install into ~mods after building (closes ACR if running)")
     b.add_argument("--launch", action="store_true", help="install and start ACR through Steam")
     b.add_argument("--no-clip", action="store_true", help="test builds: leave track meshes unclipped")
+    b.add_argument("--debug-no-baked-shapes", action="store_true",
+                   help="diagnostic only: remove primitive collision shapes but retain triangle collision")
     b.add_argument("--offset-zero", action="store_true", help="test builds: build on top of the original map")
     b.add_argument("--offset", default=None, help="test builds: placement offset x,y,z in metres")
     for kind, what in (("forest", "forest trees"), ("grass", "grass, branches and rocks"),
@@ -445,6 +480,8 @@ def main(argv=None):
 
     if a.cmd == "list":
         return _list(a)
+    if a.cmd == "inspect-collision":
+        return _inspect_collision(a)
     if a.cmd == "segments":
         return _segments(a)
     if a.cmd == "build":
