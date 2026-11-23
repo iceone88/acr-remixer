@@ -1,0 +1,157 @@
+name: Apply ACR Geometry Foundation and Build Windows EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      update_kind:
+        description: 'Choose combined for the original repository, or geometry-only if the collision inspector is already installed.'
+        required: true
+        type: choice
+        options:
+          - combined
+          - geometry-only
+        default: combined
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out the selected branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Confirm this is a branch build
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -notlike 'refs/heads/*') {
+            throw 'Run this workflow from a branch, not a tag.'
+          }
+          Write-Host "Building branch $env:GITHUB_REF_NAME"
+
+      - name: Apply the selected repository update
+        shell: pwsh
+        env:
+          UPDATE_KIND: ${{ inputs.update_kind }}
+        run: |
+          if ($env:UPDATE_KIND -eq 'combined') {
+            $patch = 'acr-remixer-combined-update.patch'
+            $other = 'acr-remixer-geometry-foundation.patch'
+          } elseif ($env:UPDATE_KIND -eq 'geometry-only') {
+            $patch = 'acr-remixer-geometry-foundation.patch'
+            $other = 'acr-remixer-combined-update.patch'
+          } else {
+            throw "Unknown update kind: $env:UPDATE_KIND"
+          }
+
+          $hasInspector = Test-Path 'stagegen/inspect_collision.py'
+          if (Test-Path $patch) {
+            if ($env:UPDATE_KIND -eq 'combined' -and $hasInspector) {
+              throw 'The collision inspector already exists. Select geometry-only instead of combined.'
+            }
+            if ($env:UPDATE_KIND -eq 'geometry-only' -and -not $hasInspector) {
+              throw 'The collision inspector is not present. Select combined instead of geometry-only.'
+            }
+
+            git apply --check $patch
+            if ($LASTEXITCODE -eq 0) {
+              git apply $patch
+              if ($LASTEXITCODE -ne 0) { throw 'git apply failed.' }
+              Write-Host "Applied $patch"
+            } else {
+              $LASTEXITCODE = 0
+              git apply --reverse --check $patch
+              if ($LASTEXITCODE -ne 0) {
+                throw "Patch $patch does not match this branch. No source files were changed by this step."
+              }
+              Write-Host 'The selected patch is already applied; continuing with tests and build.'
+            }
+          } else {
+            if (-not (Test-Path 'tests/test_splines.py') -or -not (Test-Path 'docs/geometry-road-combination.md')) {
+              throw "Cannot find $patch and the geometry-foundation files are not present. Upload the selected patch to the repository root first."
+            }
+            Write-Host 'Patch file is absent; geometry-foundation source files are already present.'
+          }
+
+          if (Test-Path $patch) { Remove-Item $patch -Force }
+          if (Test-Path $other) { Remove-Item $other -Force }
+
+      - name: Set up Python for the bundled backend and tests
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Install backend dependencies, PyInstaller and pytest
+        run: python -m pip install -r requirements.txt pyinstaller pytest
+
+      - name: Run all Python regression tests
+        run: python -m pytest -q tests
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            oodle_shim
+            gui
+
+      - name: Build the open-source Oodle compatibility DLL
+        run: cargo build --release --manifest-path oodle_shim/Cargo.toml
+
+      - name: Freeze the Python backend into a Windows executable
+        run: python -m PyInstaller packaging/backend.spec --distpath packaging/dist --workpath packaging/build --noconfirm
+
+      - name: Smoke-test the frozen backend
+        shell: pwsh
+        run: |
+          & packaging/dist/stagegen-backend.exe --help
+          if ($LASTEXITCODE -ne 0) { throw 'Backend --help smoke test failed.' }
+          & packaging/dist/stagegen-backend.exe inspect-collision --help
+          if ($LASTEXITCODE -ne 0) { throw 'Collision-inspector smoke test failed.' }
+
+      - name: Build the standalone Windows GUI (embeds the backend)
+        run: cargo build --release --manifest-path gui/Cargo.toml
+
+      - name: Prepare downloadable executables
+        shell: pwsh
+        run: |
+          $guiExe = 'gui/target/release/acr-remixer.exe'
+          $backendExe = 'packaging/dist/stagegen-backend.exe'
+          if (-not (Test-Path $guiExe)) { throw "Missing GUI executable: $guiExe" }
+          if (-not (Test-Path $backendExe)) { throw "Missing backend executable: $backendExe" }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item $guiExe 'dist/acr-remixer.exe' -Force
+          Copy-Item $backendExe 'dist/stagegen-backend.exe' -Force
+          Get-ChildItem dist | Select-Object Name, Length
+
+      - name: Commit the updated source to this branch
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m 'Apply ACR geometry foundation update'
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create the source-update commit.' }
+            git push origin "HEAD:$env:GITHUB_REF_NAME"
+            if ($LASTEXITCODE -ne 0) { throw 'Could not push the source-update commit. Check Actions write permissions and branch protection.' }
+          } else {
+            Write-Host 'No source changes to commit; the branch already contains this update.'
+          }
+
+      - name: Upload the Windows executables
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: acr-remixer-windows-exe
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

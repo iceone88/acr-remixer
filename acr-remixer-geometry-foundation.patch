@@ -1,0 +1,1141 @@
+diff --git a/.github/workflows/build-zlib-patched.yml b/.github/workflows/build-zlib-patched.yml
+index 46a0299..fe487ab 100644
+--- a/.github/workflows/build-zlib-patched.yml
++++ b/.github/workflows/build-zlib-patched.yml
+@@ -1,4 +1,4 @@
+-name: Build patched ACR Remixer for Windows
++name: Build ACR Remixer - Geometry Foundation
+ 
+ on:
+   workflow_dispatch:
+@@ -20,8 +20,11 @@ jobs:
+           python-version: '3.14'
+           cache: pip
+ 
+-      - name: Install backend dependencies and PyInstaller
+-        run: python -m pip install -r requirements.txt pyinstaller
++      - name: Install backend dependencies, PyInstaller and tests
++        run: python -m pip install -r requirements.txt pyinstaller pytest
++
++      - name: Run Python regression tests (geometry, collision and serialization)
++        run: python -m pytest -q tests
+ 
+       - name: Set up Rust
+         uses: dtolnay/rust-toolchain@stable
+@@ -40,15 +43,19 @@ jobs:
+         run: python -m PyInstaller packaging/backend.spec --distpath packaging/dist --workpath packaging/build --noconfirm
+ 
+       - name: Smoke-test the frozen backend
+-        run: packaging/dist/stagegen-backend.exe --help
++        run: |
++          packaging/dist/stagegen-backend.exe --help
++          packaging/dist/stagegen-backend.exe inspect-collision --help
+ 
+       - name: Build the Windows GUI executable
+         run: cargo build --release --manifest-path gui/Cargo.toml
+ 
+-      - name: Upload acr-remixer.exe
++      - name: Upload Windows GUI and diagnostic backend
+         uses: actions/upload-artifact@v4
+         with:
+           name: acr-remixer-windows-exe
+-          path: gui/target/release/acr-remixer.exe
++          path: |
++            gui/target/release/acr-remixer.exe
++            packaging/dist/stagegen-backend.exe
+           if-no-files-found: error
+           retention-days: 14
+diff --git a/.gitignore b/.gitignore
+index 9d2a4ce..288fc98 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,5 +1,7 @@
+ __pycache__/
+ *.pyc
+ out/
+-
+-out*/
++
++out*/
++
++.pytest_cache/
+diff --git a/README.md b/README.md
+index 76e9ff4..8f75c71 100644
+--- a/README.md
++++ b/README.md
+@@ -244,3 +244,13 @@ The road-coverage metric calculates point-to-triangle distance for a bounded set
+ of nearby triangles, not an exact Unreal physics raycast. Primitive shape
+ payloads are inventoried but are not yet semantically decoded. See
+ [Collision Inspector notes](docs/collision-inspector.md).
++
++## Road-combination geometry (experimental)
++
++The current geometry-foundation update decodes Unreal spline interpolation more
++faithfully, removes the unrestricted manual-join fallback, rejects poorly
++conditioned tile-boundary crossings, and checks the join-shear grade against the
++transformed horizontal distance. See [Road-combination geometry decisions](docs/geometry-road-combination.md)
++for the mathematics, tests and items deliberately deferred pending real-stage
++measurements. The configured join thresholds remain provisional until validated
++against original ACR stages and in-game driving.
+diff --git a/docs/geometry-road-combination.md b/docs/geometry-road-combination.md
+new file mode 100644
+index 0000000..8f6629b
+--- /dev/null
++++ b/docs/geometry-road-combination.md
+@@ -0,0 +1,75 @@
++# Road-combination geometry: implementation decisions
++
++This document records the first geometry-focused implementation pass. It does
++not claim that all ACR stages are verified; no original game PAKs or generated
++stage reports were available in this source-only review.
++
++## Implemented in this pass
++
++- Decode `FInterpCurveVector` input keys, interpolation modes, loop state and
++  loop-key offset.
++- Evaluate linear, constant and cubic interpolation using Unreal's key-interval
++  tangent scaling. Cubic segments are converted to Bezier form and adaptively
++  subdivided with a conservative control-polygon length bound and a flatness
++  tolerance.
++- Reject discontinuous constant segments rather than connecting them with an
++  invented diagonal road segment.
++- Reject manual joins that exceed the configured kink, grade or width limits;
++  remove the old 180-degree placement fallback.
++- Reject nearly parallel boundary crossings instead of clamping their small
++  normal component and producing unbounded longitudinal deformation.
++- Calculate vertical shear so the resulting grade is matched per transformed
++  horizontal arclength, accounting for the horizontal speed change introduced
++  by the lateral shear.
++- Add regression tests for spline semantics, join derivatives and manual
++  sequence rejection.
++
++## Join shear mathematics
++
++Let `e` be the tile-boundary tangent and `n` its selected normal. A road unit
++heading at angle `a` is `u = sin(a)e + cos(a)n`. The existing compact-support
++profile is `g(d) = d(1-d/D)^2` for `0 <= d < D`, and zero after `D`.
++Its maximum is `4D/27`; it has zero displacement at the boundary and zero
++first derivative at the outer support edge.
++
++The boundary-parallel shear coefficient changes the tangent angle from the
++source angle to the mean angle `a_m`. This also changes horizontal speed:
++`|dXY_new/ds_source| = cos(a_source)/cos(a_m)`. Therefore the vertical shear
++must match grade after this speed change. With source grades `q_in` and
++`q_out`, and `q_m = (q_in + q_out)/2`, the implemented coefficients are:
++
++- next side: `Az_out = q_m/cos(a_m) - q_out/cos(a_out)`
++- previous side: `Az_in = q_in/cos(a_in) - q_m/cos(a_m)`
++
++This makes both transformed one-sided grades equal to `q_m` at the join when
++grade is measured as `dz / horizontal_distance`. Property tests exercise
++random crossing orientations and grades.
++
++The current displacement profile is C1 but not C2 at its outer support edge.
++A higher-order polynomial is not substituted automatically: candidate profiles
++can introduce stronger counter-shear or other undesirable derivatives and must
++be compared against source-stage geometry before selection.
++
++## Deliberately deferred
++
++The following require representative original/generated ACR data or in-game
++validation before safe implementation:
++
++- Numeric maximum deformation budgets for vertical and boundary-parallel shifts.
++- Matching left/right road border splines to centerline stations and preserving
++  crossfall/banking in generated route splines.
++- Separating terrain-only seam blending from road meshes and road collision.
++  The current source has path-name classifications, but their correctness and
++  relationship to ACR's baked collision meshes need validation on real stages.
++- Road-wide collision sampling and surface classification using actual
++  material/owner mappings.
++- Tree/rock/barrier broad-phase and narrow-phase clearance using real
++  BodySetup/AggGeom and instance transforms.
++- Grid-corner supercover traversal and stage-specific grid calibration.
++
++No vertical- or boundary-parallel-deformation budget has been invented in
++this pass. The boundary-normal projection floor (currently 0.2, configurable)
++is a provisional numerical guard that caps the inverse projection factor at 5;
++it has not been calibrated against ACR stage availability. The existing join
++limits also remain provisional and should be calibrated against Hafren South
++and Elatia source geometry and measured in-game results.
+diff --git a/stagegen/extract/splines.py b/stagegen/extract/splines.py
+index f124f35..1eefdf9 100644
+--- a/stagegen/extract/splines.py
++++ b/stagegen/extract/splines.py
+@@ -1,34 +1,52 @@
+ # SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+ # SPDX-License-Identifier: MIT
+ 
+-"""Read the route splines from a stage level (SplinesActor -> DMSplineComponent).
++"""Read and evaluate Unreal FInterpCurveVector data from cooked stage levels.
+ 
+-Each DMSplineComponent (CenterSpline, IdealSpline, Left/RightBorderSpline,
+-ContourSpline, ...) serialises SplineCurves first:
+-
+-    FSplineCurves [first value]
+-      [0] Position: FInterpCurveVector
+-            [0] Points: TArray<FInterpCurvePointVector>
+-                  [0] InVal float  [1] OutVal FVector(d)  [2] ArriveTangent
+-                  [3] LeaveTangent [4] InterpMode u8
+-
+-Coordinates are UE world space (cm, Z up). Component transforms of the
+-SplinesActor are identity in every level checked so far.
++Coordinates in the inspected ACR spline exports are UE world-space centimetres
++(X/Y horizontal, Z up). The containing spline component transforms have been
++observed to be identity in the levels examined so far; this must be verified for
++any new stage before assuming the values are world-space.
+ """
+ from __future__ import annotations
+ 
++from dataclasses import dataclass
++
+ import numpy as np
+ 
+ from .unversioned import Reader
+ from .zen import Package
+ 
+ 
++# EInterpCurveMode values in Unreal's Math/InterpCurvePoint.h.
++CIM_LINEAR = 0
++CIM_CURVE_AUTO = 1
++CIM_CONSTANT = 2
++CIM_CURVE_USER = 3
++CIM_CURVE_BREAK = 4
++CIM_CURVE_AUTO_CLAMPED = 5
++CIM_UNKNOWN = 6
++
++
++@dataclass(frozen=True)
++class SplineCurve:
++    """One serialized FInterpCurveVector, in its native input-key domain."""
++
++    input_keys: np.ndarray       # (N,), FInterpCurvePoint::InVal
++    positions: np.ndarray        # (N,3), FVector OutVal (cm)
++    arrive_tangents: np.ndarray  # (N,3), FVector (per input-key unit)
++    leave_tangents: np.ndarray   # (N,3), FVector (per input-key unit)
++    interp_modes: np.ndarray     # (N,), EInterpCurveMode byte
++    is_looped: bool = False
++    loop_key_offset: float = 0.0
++
++
+ def _vec(r: Reader):
+     return (r.f64(), r.f64(), r.f64())
+ 
+ 
+-def read_spline_points(pk: Package, export_name: str):
+-    """Return (inval[N], pos[N,3], arrive[N,3], leave[N,3]) in UE cm."""
++def read_spline_curve(pk: Package, export_name: str) -> SplineCurve:
++    """Decode the Position FInterpCurveVector of a DMSplineComponent export."""
+     e = next(x for x in pk.exports if x.name == export_name)
+     r = Reader(pk.d, e.data_offset)
+     top = r.header()
+@@ -37,58 +55,220 @@ def read_spline_points(pk: Package, export_name: str):
+         top = top[1:]
+     if not top or top[0] != 2:
+         raise ValueError(f"no SplineCurves in {export_name}: {top}")
++
+     curves = r.header()          # FSplineCurves
+     if not curves or curves[0] != 0:
+         raise ValueError(f"no Position curve in {export_name}: {curves}")
+-    pos_curve = r.header()       # FInterpCurveVector
+-    if not pos_curve or pos_curve[0] != 0:
+-        return np.zeros(0), np.zeros((0, 3)), np.zeros((0, 3)), np.zeros((0, 3))
++
++    curve_fields = r.header()    # FInterpCurveVector: Points, bIsLooped, LoopKeyOffset
++    if not curve_fields or curve_fields[0] != 0:
++        return SplineCurve(np.zeros(0), np.zeros((0, 3)), np.zeros((0, 3)),
++                           np.zeros((0, 3)), np.zeros(0, dtype=np.uint8))
++
+     n = r.u32()
+-    inval = np.zeros(n)
+-    P = np.zeros((n, 3)); A = np.zeros((n, 3)); L = np.zeros((n, 3))
++    inval = np.zeros(n, dtype=np.float64)
++    positions = np.zeros((n, 3), dtype=np.float64)
++    arrive = np.zeros((n, 3), dtype=np.float64)
++    leave = np.zeros((n, 3), dtype=np.float64)
++    # The two-argument FInterpCurvePoint constructor defaults to CIM_Linear.
++    modes = np.full(n, CIM_LINEAR, dtype=np.uint8)
+     for k in range(n):
+         for f in r.header():
+             if f == 0:
+                 inval[k] = r.f32()
+             elif f == 1:
+-                P[k] = _vec(r)
++                positions[k] = _vec(r)
+             elif f == 2:
+-                A[k] = _vec(r)
++                arrive[k] = _vec(r)
+             elif f == 3:
+-                L[k] = _vec(r)
++                leave[k] = _vec(r)
+             elif f == 4:
+-                r.u8()
++                modes[k] = r.u8()
+             else:
+                 raise ValueError(f"unexpected curve point field {f}")
+-    return inval, P, A, L
++
++    is_looped = False
++    loop_key_offset = 0.0
++    for f in curve_fields:
++        if f == 1:
++            is_looped = bool(r.u8())
++        elif f == 2:
++            loop_key_offset = float(r.f32())
++        elif f != 0:
++            raise ValueError(f"unexpected FInterpCurve field {f}")
++
++    arrays = (inval, positions, arrive, leave)
++    if n and not all(np.all(np.isfinite(a)) for a in arrays):
++        raise ValueError(f"non-finite spline data in {export_name}")
++    if n > 1 and np.any(np.diff(inval) <= 0):
++        raise ValueError(f"non-increasing spline input keys in {export_name}")
++    if np.any(modes > CIM_UNKNOWN):
++        raise ValueError(f"unsupported spline interpolation mode in {export_name}: {modes.max()}")
++    # Unreal defines this as the interval from the last input key to the
++    # virtual loop point, not as the total first-to-last key span.
++    if is_looped and n > 1 and (not np.isfinite(loop_key_offset) or loop_key_offset <= 0):
++        raise ValueError(f"invalid LoopKeyOffset in {export_name}: {loop_key_offset}")
++
++    return SplineCurve(inval, positions, arrive, leave, modes, is_looped, loop_key_offset)
++
++
++def read_spline_points(pk: Package, export_name: str):
++    """Backward-compatible reader: (inval, positions, arrive, leave), in UE cm."""
++    c = read_spline_curve(pk, export_name)
++    return c.input_keys, c.positions, c.arrive_tangents, c.leave_tangents
++
++
++def _point_segment_distance(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
++    ab = b - a
++    den = float(ab @ ab)
++    if den <= 1e-24:
++        return float(np.linalg.norm(p - a))
++    t = float(np.clip(((p - a) @ ab) / den, 0.0, 1.0))
++    return float(np.linalg.norm(p - (a + t * ab)))
++
++
++def _split_bezier(c: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
++    b0, b1, b2, b3 = c
++    b01 = (b0 + b1) * 0.5
++    b12 = (b1 + b2) * 0.5
++    b23 = (b2 + b3) * 0.5
++    b012 = (b01 + b12) * 0.5
++    b123 = (b12 + b23) * 0.5
++    mid = (b012 + b123) * 0.5
++    return (np.stack((b0, b01, b012, mid)),
++            np.stack((mid, b123, b23, b3)))
++
++
++def _append_unique(out: list[np.ndarray], point: np.ndarray, eps: float = 1e-9):
++    if not out or np.linalg.norm(point - out[-1]) > eps:
++        out.append(np.asarray(point, dtype=np.float64).copy())
++
++
++def _append_adaptive_bezier(control: np.ndarray, out: list[np.ndarray], step_cm: float,
++                            tolerance_cm: float, depth: int, max_depth: int,
++                            max_points: int):
++    """Append a cubic Bezier endpoint using convex-hull length/flatness bounds."""
++    b0, b1, b2, b3 = control
++    polygon = (float(np.linalg.norm(b1 - b0)) + float(np.linalg.norm(b2 - b1))
++               + float(np.linalg.norm(b3 - b2)))
++    flatness = max(_point_segment_distance(b1, b0, b3),
++                   _point_segment_distance(b2, b0, b3))
++    if polygon <= step_cm and flatness <= tolerance_cm:
++        _append_unique(out, b3)
++        if len(out) > max_points:
++            raise ValueError(f"spline sampling exceeded the {max_points:,} point safety limit")
++        return
++    if depth >= max_depth:
++        raise ValueError("spline adaptive sampling reached max depth; curve is too sharp or malformed")
++    left, right = _split_bezier(control)
++    _append_adaptive_bezier(left, out, step_cm, tolerance_cm, depth + 1, max_depth, max_points)
++    _append_adaptive_bezier(right, out, step_cm, tolerance_cm, depth + 1, max_depth, max_points)
++
++
++def sample_spline(curve: SplineCurve, step_cm: float = 50.0,
++                  tolerance_cm: float = 1.0, max_depth: int = 16,
++                  max_points: int = 2_000_000) -> np.ndarray:
++    """Sample FInterpCurveVector using Unreal's key-interval and mode semantics.
++
++    Unreal scales endpoint tangents by the input-key interval before cubic
++    Hermite interpolation. This implementation converts the resulting segment
++    to an equivalent Bezier and subdivides it adaptively. Linear interpolation
++    is sampled directly. Constant interpolation is rejected when it would
++    create a positional jump, because the downstream road representation is a
++    continuous polyline and must not invent a diagonal ramp across that jump.
++    """
++    if not np.isfinite(step_cm) or step_cm <= 0:
++        raise ValueError("step_cm must be finite and positive")
++    if not np.isfinite(tolerance_cm) or tolerance_cm < 0:
++        raise ValueError("tolerance_cm must be finite and non-negative")
++    if not isinstance(max_depth, int) or max_depth < 0:
++        raise ValueError("max_depth must be a non-negative integer")
++    if not isinstance(max_points, int) or max_points < 2:
++        raise ValueError("max_points must be an integer >= 2")
++
++    P = np.asarray(curve.positions, np.float64)
++    keys = np.asarray(curve.input_keys, np.float64)
++    arrive = np.asarray(curve.arrive_tangents, np.float64)
++    leave = np.asarray(curve.leave_tangents, np.float64)
++    modes = np.asarray(curve.interp_modes, np.uint8)
++    n = len(P)
++    if P.shape != (n, 3) or keys.shape != (n,) or arrive.shape != (n, 3)             or leave.shape != (n, 3) or modes.shape != (n,):
++        raise ValueError("spline curve arrays have inconsistent shapes")
++    if not all(np.all(np.isfinite(a)) for a in (P, keys, arrive, leave)):
++        raise ValueError("spline curve contains non-finite values")
++    if np.any(modes > CIM_UNKNOWN):
++        raise ValueError("spline curve contains an unsupported interpolation mode")
++    if n > 1 and np.any(np.diff(keys) <= 0):
++        raise ValueError("spline input keys must be strictly increasing")
++    if n == 0:
++        return np.zeros((0, 3), dtype=np.float64)
++    if n == 1:
++        return P.copy()
++
++    segments = [(i, i + 1, float(keys[i + 1] - keys[i])) for i in range(n - 1)]
++    if curve.is_looped:
++        # FInterpCurve::Eval uses LoopKeyOffset itself as the final segment Diff.
++        if not np.isfinite(curve.loop_key_offset) or curve.loop_key_offset <= 0:
++            raise ValueError("looped spline has a non-positive LoopKeyOffset")
++        segments.append((n - 1, 0, float(curve.loop_key_offset)))
++
++    out: list[np.ndarray] = [P[0].copy()]
++    for i, j, diff in segments:
++        if diff <= 0 or not np.isfinite(diff):
++            raise ValueError(f"invalid spline input-key interval at segment {i}")
++        mode = int(modes[i])
++        p0, p1 = P[i], P[j]
++
++        if mode == CIM_CONSTANT:
++            if np.linalg.norm(p1 - p0) > 1e-6:
++                raise ValueError(f"constant spline segment {i} is discontinuous; cannot use as road geometry")
++            _append_unique(out, p1)
++            continue
++
++        if mode == CIM_LINEAR:
++            length = float(np.linalg.norm(p1 - p0))
++            count = max(1, int(np.ceil(length / step_cm)))
++            if len(out) + count > max_points:
++                raise ValueError(f"spline sampling exceeded the {max_points:,} point safety limit")
++            for k in range(1, count + 1):
++                _append_unique(out, p0 + (p1 - p0) * (k / count))
++            continue
++
++        # As in FInterpCurve::Eval, every non-linear/non-constant mode uses
++        # cubic interpolation. CIM_Unknown is documented as invalid, but UE's
++        # evaluator takes the cubic branch for it; preserve that behavior.
++        m0 = leave[i] * diff
++        m1 = arrive[j] * diff
++        control = np.stack((p0, p0 + m0 / 3.0, p1 - m1 / 3.0, p1))
++        _append_adaptive_bezier(control, out, step_cm, tolerance_cm, 0, max_depth, max_points)
++
++    result = np.asarray(out, np.float64)
++    if not np.all(np.isfinite(result)):
++        raise ValueError("spline sampling produced non-finite coordinates")
++    return result
+ 
+ 
+ def sample_hermite(P, A, L, step_cm: float = 50.0) -> np.ndarray:
+-    """Densely sample a UE CurveUser/CurveAuto spline (cubic Hermite per segment)."""
+-    out = []
+-    for i in range(len(P) - 1):
+-        p0, p1, m0, m1 = P[i], P[i + 1], L[i], A[i + 1]
+-        seg = np.linalg.norm(p1 - p0)
+-        n = max(2, int(seg / step_cm) + 1)
+-        t = np.linspace(0, 1, n, endpoint=False)[:, None]
+-        h00 = 2 * t**3 - 3 * t**2 + 1
+-        h10 = t**3 - 2 * t**2 + t
+-        h01 = -2 * t**3 + 3 * t**2
+-        h11 = t**3 - t**2
+-        out.append(h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1)
+-    out.append(P[-1:])
+-    return np.vstack(out)
++    """Compatibility helper for uniform-key cubic curves."""
++    P = np.asarray(P, np.float64)
++    A = np.asarray(A, np.float64)
++    L = np.asarray(L, np.float64)
++    if P.ndim != 2 or P.shape[1:] != (3,) or A.shape != P.shape or L.shape != P.shape:
++        raise ValueError("P, A and L must be arrays of shape (N, 3)")
++    n = len(P)
++    curve = SplineCurve(np.arange(n, dtype=np.float64), P, A, L,
++                        np.full(n, CIM_CURVE_USER, dtype=np.uint8))
++    return sample_spline(curve, step_cm=step_cm)
+ 
+ 
+ def level_splines(pk: Package) -> dict[str, np.ndarray]:
+-    """All non-empty DMSplineComponents of the level, sampled densely, in metres
+-    (x, y horizontal, z up; UE axes kept)."""
++    """All non-empty route/border splines, sampled in metres (UE axes kept)."""
+     res = {}
+     for name in ("CenterSpline", "IdealSpline", "LeftBorderSpline", "RightBorderSpline"):
+         try:
+-            _, P, A, L = read_spline_points(pk, name)
++            curve = read_spline_curve(pk, name)
+         except StopIteration:
+             continue
+-        if len(P) > 1:
+-            res[name] = sample_hermite(P, A, L) / 100.0
++        if len(curve.positions) > 1:
++            res[name] = sample_spline(curve) / 100.0
+     return res
+diff --git a/stagegen/joins.py b/stagegen/joins.py
+index 3694ca1..f55cc6d 100644
+--- a/stagegen/joins.py
++++ b/stagegen/joins.py
+@@ -1,15 +1,17 @@
+ # SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+ # SPDX-License-Identifier: MIT
+ 
+-"""Smooth the joins between pieces (kinks in direction and gradient).
+-
+-Pieces meet on a grid line, edge to edge. Rotating a piece would open the
+-edge, so instead each side of the line is *sheared along the line*: a point at
+-distance d from the line moves by A * g(d) along it (and by Az * g(d) up),
+-with g(0) = 0, g'(0) = 1, g(D) = g'(D) = 0. Points on the line stay put (the
+-meshes stay seamless), the road's crossing angle (and slope) at the line
+-changes by the amount needed to meet the other side, and beyond D nothing
+-moves. A kink becomes a smooth bend about 2 D long.
++"""Constrained, tile-boundary join shears for recombined road sections.
++
++The shear is applied in the boundary-normal coordinate. The public join API
++accepts a requested reach measured along each road; it converts this to the
++normal-coordinate reach so shallow boundary crossings do not accidentally
++stretch a nominal transition over several hundred metres of road.
++
++The current compact-support profile is C1 (position and tangent continuous)
++but not C2 at the outer edge. Replacing it with a higher-order profile is
++intentionally deferred until source-stage curvature and in-game measurements
++can be used to calibrate the trade-off.
+ """
+ from __future__ import annotations
+ 
+@@ -19,27 +21,137 @@ import numpy as np
+ 
+ 
+ def _g(d: np.ndarray, D: float) -> np.ndarray:
++    """Compact-support displacement profile; g(0)=0, g'(0)=1, g(D)=g'(D)=0."""
++    if not np.isfinite(D) or D <= 0:
++        raise ValueError("shear reach must be finite and positive")
+     u = np.clip(d / D, 0.0, 1.0)
+     return d * (1.0 - u) ** 2 * (d < D)
+ 
+ 
+ def _dg(d: np.ndarray, D: float) -> np.ndarray:
++    if not np.isfinite(D) or D <= 0:
++        raise ValueError("shear reach must be finite and positive")
+     u = np.clip(d / D, 0.0, 1.0)
+     return ((1.0 - u) ** 2 - 2.0 * u * (1.0 - u)) * (d < D)
+ 
+ 
+-@dataclass
++@dataclass(frozen=True)
++class JoinAssessment:
++    """Geometric quantities required to construct both sides of a join."""
++
++    a_in: float
++    a_out: float
++    kink_deg: float
++    normal_in: float
++    normal_out: float
++    A_prev: float
++    A_next: float
++    Az_prev: float
++    Az_next: float
++    D_prev_normal: float
++    D_next_normal: float
++    max_boundary_parallel_shift_m: float
++    max_vertical_shift_m: float
++    reach_prev_m: float
++    reach_next_m: float
++
++
++def assess_join(line_angle: float, h_prev: float, h_next: float,
++                g_prev: float, g_next: float,
++                reach_prev_m: float, reach_next_m: float,
++                max_kink_deg: float = 60.0,
++                min_normal_component: float = 0.2) -> JoinAssessment | None:
++    """Assess a join before modifying geometry; return None if ill-conditioned.
++
++    ``reach_prev_m`` and ``reach_next_m`` are nominal source-road arclengths.
++    The normal-component threshold caps the inverse boundary-projection factor
++    at ``1 / min_normal_component``. It is a rejection criterion, not a
++    denominator clamp: near-parallel crossings are not silently treated as
++    ordinary crossings.
++    """
++    vals = (line_angle, h_prev, h_next, g_prev, g_next, reach_prev_m,
++            reach_next_m, max_kink_deg, min_normal_component)
++    if not all(np.isfinite(v) for v in vals):
++        return None
++    if reach_prev_m <= 0 or reach_next_m <= 0 or max_kink_deg < 0:
++        return None
++    if not (0 < min_normal_component < 1):
++        return None
++
++    e = np.array([np.cos(line_angle), np.sin(line_angle)], dtype=np.float64)
++    n = np.array([-e[1], e[0]], dtype=np.float64)
++    u_out = np.array([np.cos(h_next), np.sin(h_next)], dtype=np.float64)
++    if u_out @ n < 0:
++        n = -n
++    u_in = np.array([np.cos(h_prev), np.sin(h_prev)], dtype=np.float64)
++    normal_in = float(u_in @ n)
++    normal_out = float(u_out @ n)
++    if normal_in < min_normal_component or normal_out < min_normal_component:
++        return None
++
++    a_in = float(np.arctan2(u_in @ e, normal_in))
++    a_out = float(np.arctan2(u_out @ e, normal_out))
++    kink_deg = float(np.degrees(a_out - a_in))
++    if abs(kink_deg) > max_kink_deg:
++        return None
++
++    # Solve the exact tangent-matching shear coefficients on either side.
++    a_mid = (a_in + a_out) * 0.5
++    tan_in, tan_out, tan_mid = np.tan(a_in), np.tan(a_out), np.tan(a_mid)
++    A_next = tan_mid - tan_out
++    A_prev = tan_in - tan_mid
++    g_mid = (g_prev + g_next) * 0.5
++    # Horizontal shear changes the horizontal speed along the transformed
++    # curve. Its normal component remains cos(a), while its target direction
++    # is a_mid, so |dXY_new/ds_source| = cos(a) / cos(a_mid). Match grade
++    # dz / ds_horizontal after that speed change, not dz per source parameter.
++    cos_mid = float(np.cos(a_mid))
++    Az_next = g_mid / cos_mid - g_next / normal_out
++    Az_prev = g_prev / normal_in - g_mid / cos_mid
++
++    # The requested reach is measured along the un-deformed source road;
++    # convert it to the boundary-normal coordinate used by Shear.apply().
++    D_prev = reach_prev_m * normal_in
++    D_next = reach_next_m * normal_out
++    if min(D_prev, D_next) <= 1e-6:
++        return None
++
++    # max of d*(1-d/D)^2 is 4D/27 at d=D/3.
++    max_boundary_parallel = max(abs(A_prev) * 4 * D_prev / 27,
++                                 abs(A_next) * 4 * D_next / 27)
++    max_vertical = max(abs(Az_prev) * 4 * D_prev / 27,
++                       abs(Az_next) * 4 * D_next / 27)
++    derived = (A_prev, A_next, Az_prev, Az_next, D_prev, D_next,
++               max_boundary_parallel, max_vertical)
++    if not all(np.isfinite(v) for v in derived):
++        return None
++
++    return JoinAssessment(a_in, a_out, abs(kink_deg), normal_in, normal_out,
++                          A_prev, A_next, Az_prev, Az_next, D_prev, D_next,
++                          max_boundary_parallel, max_vertical, reach_prev_m, reach_next_m)
++
++
++@dataclass(frozen=True)
+ class Shear:
+     p0: np.ndarray        # (2,) a point on the join line (layout frame, m)
+     e: np.ndarray         # (2,) unit vector along the line
+     n: np.ndarray         # (2,) unit normal pointing into this side
+     A: float              # along-line shear at the line (dx_e / dd)
+     Az: float             # vertical shear at the line (dz / dd)
+-    D: float              # reach (m)
++    D: float              # reach in the boundary-normal coordinate (m)
+ 
+     def shifted(self, off: np.ndarray) -> "Shear":
+         return Shear(self.p0 + off[:2], self.e, self.n, self.A, self.Az, self.D)
+ 
++    @property
++    def max_boundary_parallel_shift_m(self) -> float:
++        """Maximum displacement parallel to the tile boundary, not road-lateral."""
++        return abs(self.A) * 4.0 * self.D / 27.0
++
++    @property
++    def max_vertical_shift_m(self) -> float:
++        return abs(self.Az) * 4.0 * self.D / 27.0
++
+     def _d(self, xy):
+         return (np.atleast_2d(xy)[:, :2] - self.p0) @ self.n
+ 
+@@ -57,44 +169,37 @@ class Shear:
+         return P
+ 
+     def yaw(self, xy: np.ndarray) -> np.ndarray:
+-        """Local rotation (rad) of the map at xy (for objects' headings): the
+-        shear turns directions along n by atan(A g'(d))."""
++        """Local map yaw change of directions along the boundary normal."""
+         d = self._d(xy)
+         dg = np.where(d > 0, _dg(np.maximum(d, 0), self.D), 0.0)
+-        # a direction along n becomes n + A g' e: turned towards e (z of n x e gives the sense)
+         sense = np.sign(self.n[0] * self.e[1] - self.n[1] * self.e[0])
+         return np.arctan(self.A * dg) * sense
+ 
+ 
+-def _cross_angle(u: np.ndarray, e: np.ndarray, n: np.ndarray) -> float:
+-    return float(np.arctan2(u @ e, u @ n))
+-
+-
+-def join_shears(p0, line_angle: float, h_prev: float, h_next: float, g_prev: float, g_next: float,
+-                D_prev: float, D_next: float, max_kink_deg: float = 60.0):
+-    """Shears for both sides of one join. p0: join point (layout frame);
+-    line_angle: world angle of the grid line; h_prev/h_next: road headings
+-    (rad, direction of travel) arriving/leaving; g_prev/g_next: gradients.
+-    Returns (shear for the previous piece's side, shear for the next one's)."""
+-    e = np.array([np.cos(line_angle), np.sin(line_angle)])
+-    n = np.array([-e[1], e[0]])
+-    u_out = np.array([np.cos(h_next), np.sin(h_next)])
+-    if u_out @ n < 0:
+-        n = -n                                     # n points along travel, into the next piece
+-    u_in = np.array([np.cos(h_prev), np.sin(h_prev)])
+-    a_in, a_out = _cross_angle(u_in, e, n), _cross_angle(u_out, e, n)
+-    if abs(np.degrees(a_out - a_in)) > max_kink_deg:
++def join_shears(p0, line_angle: float, h_prev: float, h_next: float,
++                g_prev: float, g_next: float,
++                reach_prev_m: float, reach_next_m: float,
++                max_kink_deg: float = 60.0,
++                min_normal_component: float = 0.2):
++    """Return both shear transforms, or ``(None, None)`` for an unsafe join.
++
++    Reach arguments are nominal source-road arclengths, not normal to the
++    grid boundary. Use :func:`assess_join` to inspect predicted offsets.
++    """
++    assessment = assess_join(line_angle, h_prev, h_next, g_prev, g_next,
++                             reach_prev_m, reach_next_m, max_kink_deg,
++                             min_normal_component)
++    if assessment is None:
+         return None, None
+-    a_mid = (a_in + a_out) / 2
+-    # direction (cos a, sin a) in (n, e); a shear x_e += A d (d along the side's
+-    # normal) maps it to (cos a, sin a + A cos a [n-dir sign]) -> tan a' = tan a + A s
+-    # next side: normal n, d grows along travel
+-    A_next = np.tan(a_mid) - np.tan(a_out)
+-    # previous side: normal -n, d grows against travel: x_e += A d, d = -(x . n)
+-    A_prev = -(np.tan(a_mid) - np.tan(a_in))
+-    g_mid = (g_prev + g_next) / 2
+-    # slope along travel; d per metre of travel = cos a (next) / -cos a (prev side)
+-    Az_next = (g_mid - g_next) / max(np.cos(a_out), 0.2)
+-    Az_prev = -(g_mid - g_prev) / max(np.cos(a_in), 0.2)
++
++    e = np.array([np.cos(line_angle), np.sin(line_angle)], dtype=np.float64)
++    n = np.array([-e[1], e[0]], dtype=np.float64)
++    if np.array([np.cos(h_next), np.sin(h_next)]) @ n < 0:
++        n = -n
+     p0 = np.asarray(p0, np.float64)[:2]
+-    return (Shear(p0, e, -n, A_prev, Az_prev, D_prev), Shear(p0, e, n, A_next, Az_next, D_next))
++    if p0.shape != (2,) or not np.all(np.isfinite(p0)):
++        return None, None
++    return (
++        Shear(p0, e, -n, assessment.A_prev, assessment.Az_prev, assessment.D_prev_normal),
++        Shear(p0, e, n, assessment.A_next, assessment.Az_next, assessment.D_next_normal),
++    )
+diff --git a/stagegen/tiles.py b/stagegen/tiles.py
+index a456dc5..a70d28f 100644
+--- a/stagegen/tiles.py
++++ b/stagegen/tiles.py
+@@ -1,4 +1,4 @@
+-﻿# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
++# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
+ # SPDX-License-Identifier: MIT
+ 
+ """Tile-aligned recombination for base-game (World Partition) stages.
+@@ -147,7 +147,8 @@ class TileSearchConfig:
+     # and grade steps become gentle bends; 0 = off (rigid joins as before)
+     smooth_kink_deg: float = 45.0
+     smooth_grade: float = 0.12
+-    smooth_reach: float = 120.0    # m either side of a join (at most 40 % of the piece)
++    smooth_reach: float = 120.0    # m along each road, capped at 40 % of that piece
++    min_boundary_crossing_cos: float = 0.2  # reject nearly parallel tile-boundary crossings
+     max_width_mismatch: float = 2.0
+     clearance: float = 95.0        # min distance between roads of non-adjacent pieces (m)
+     beam_width: int = 128
+@@ -248,11 +249,17 @@ def join_shears(best: TState, cfg: TileSearchConfig) -> tuple[list[list], dict]:
+         D_a = min(cfg.smooth_reach, 0.4 * a.rng.seg.length)
+         D_b = min(cfg.smooth_reach, 0.4 * b.rng.seg.length)
+         sa, sb = _js(a.exit_p, a.exit_line, a.exit_heading, b.entry_heading, a.exit_grade, b.entry_grade,
+-                     D_a, D_b, max_kink_deg=180.0)
+-        if sa is not None:
+-            out[k - 1].append(sa)
+-            out[k].append(sb)
+-            smoothed[k] = max(D_a, D_b)
++                     D_a, D_b, max_kink_deg=max(cfg.max_kink_deg, cfg.smooth_kink_deg),
++                     min_normal_component=cfg.min_boundary_crossing_cos)
++        if sa is None or sb is None:
++            raise ValueError(
++                f"join {k - 1}->{k} cannot be safely smoothed: kink {kink:.1f} deg "
++                f"or boundary crossing is too oblique (minimum normal component "
++                f"{cfg.min_boundary_crossing_cos:.2f})"
++            )
++        out[k - 1].append(sa)
++        out[k].append(sb)
++        smoothed[k] = max(D_a, D_b)
+     return out, smoothed
+ 
+ 
+@@ -285,12 +292,24 @@ def _place(rng: Range, rev: bool, cuts: list[Cut], st: TState, cfg: TileSearchCo
+         if best is None or abs(kink) < abs(best[1]):
+             best = (yaw, kink)
+     yaw, kink = best
+-    if abs(np.degrees(kink)) > (max(cfg.max_kink_deg, cfg.smooth_kink_deg) if smooth else cfg.max_kink_deg):
++    kink_limit = max(cfg.max_kink_deg, cfg.smooth_kink_deg) if smooth else cfg.max_kink_deg
++    if abs(np.degrees(kink)) > kink_limit:
+         return None
++    g_in = -ent.grade if rev else ent.grade
++    if cfg.smooth_kink_deg > 0 and (abs(np.degrees(kink)) >= 3.0 or abs(g_in - st.exit_grade) >= 0.02):
++        from .joins import assess_join
++        reach_prev = min(cfg.smooth_reach, 0.4 * st.rng.seg.length)
++        reach_next = min(cfg.smooth_reach, 0.4 * rng.seg.length)
++        assessment = assess_join(
++            st.exit_line, st.exit_heading, h_in + yaw, st.exit_grade, g_in,
++            reach_prev, reach_next, max_kink_deg=kink_limit,
++            min_normal_component=cfg.min_boundary_crossing_cos,
++        )
++        if assessment is None:
++            return None
+     R = rot_z(yaw)
+     trans = st.exit_p - R @ ent.p
+     pts = rng.seg.points(rev) @ R.T + trans
+-    g_in = -ent.grade if rev else ent.grade
+     return pts, yaw, trans, kink, g_in, ent, ext
+ 
+ 
+@@ -336,10 +355,12 @@ def parse_sequence(text: str) -> list[tuple[int, int, bool]]:
+ 
+ def sequence_state(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: TileSearchConfig,
+                    seq: list[tuple[int, int, bool]]) -> tuple[TState, list[str]]:
+-    """The layout for a given piece sequence (instead of the search). Hard
+-    errors raise ValueError (unknown piece, wrong ends, too many uses, pieces
+-    overlapping); soft limits (kink, grade, width, clearance) come back as
+-    warnings."""
++    """The layout for a given piece sequence (instead of the search).
++
++    Geometric join constraints are hard errors; only non-adjacent proximity is
++    reported as a warning because the final terrain and object footprints are
++    needed to determine whether that overlap is actually harmful.
++    """
+     by_ab = {(r.a, r.b): r for r in ranges}
+     last = len(cuts) - 1
+     warns = []
+@@ -375,16 +396,25 @@ def sequence_state(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg
+             raise ValueError("sequence: the finish piece's tiles are already used (it must be their first use)")
+         placed = _place(r, rev, cuts, st, cfg, smooth=True)
+         if placed is None:
+-            # _place refuses kinks over the limit: place anyway, warn
+-            loose = TileSearchConfig(**{**cfg.__dict__, "max_kink_deg": 180.0})
+-            placed = _place(r, rev, cuts, st, loose)
+-            warns.append(f"{a}-{b}{'r' if rev else ''}: kink {abs(np.degrees(placed[3])):.0f} deg at the join "
+-                         f"(smoothed up to {max(cfg.max_kink_deg, cfg.smooth_kink_deg):.0f}; this one stays sharp)")
++            raise ValueError(
++                f"sequence: {a}-{b}{'r' if rev else ''} cannot join within the configured "
++                f"{max(cfg.max_kink_deg, cfg.smooth_kink_deg):.0f} degree limit or the "
++                "boundary-crossing conditioning limit; choose a more compatible section"
++            )
+         pts, yaw, trans, kink, g_in, ent, ext = placed
+-        if abs(g_in - st.exit_grade) > max(cfg.max_grade_mismatch, cfg.smooth_grade):
+-            warns.append(f"{a}-{b}{'r' if rev else ''}: gradient step {abs(g_in - st.exit_grade) * 100:.0f} % at the join")
++        grade_limit = max(cfg.max_grade_mismatch, cfg.smooth_grade) if cfg.smooth_kink_deg > 0 else cfg.max_grade_mismatch
++        if abs(g_in - st.exit_grade) > grade_limit:
++            raise ValueError(
++                f"sequence: {a}-{b}{'r' if rev else ''} has a "
++                f"{abs(g_in - st.exit_grade) * 100:.1f}% grade discontinuity, above "
++                f"the configured {grade_limit * 100:.1f}% limit"
++            )
+         if abs(ent.width - st.exit_width) > cfg.max_width_mismatch:
+-            warns.append(f"{a}-{b}{'r' if rev else ''}: road width step {abs(ent.width - st.exit_width):.1f} m")
++            raise ValueError(
++                f"sequence: {a}-{b}{'r' if rev else ''} changes road width by "
++                f"{abs(ent.width - st.exit_width):.1f} m, above the configured "
++                f"{cfg.max_width_mismatch:.1f} m limit"
++            )
+         cxy = _coarse(pts, cfg)
+         if _too_close(st, cxy, cfg):
+             warns.append(f"{a}-{b}{'r' if rev else ''}: comes within {cfg.clearance:.0f} m of an earlier piece "
+diff --git a/tests/test_join_math.py b/tests/test_join_math.py
+new file mode 100644
+index 0000000..d375bd6
+--- /dev/null
++++ b/tests/test_join_math.py
+@@ -0,0 +1,103 @@
++import numpy as np
++import pytest
++
++from stagegen.joins import assess_join, join_shears
++
++
++def test_join_assessment_limits_normal_projection_and_reports_offsets():
++    angle = 0.0
++    h_in = np.deg2rad(80)
++    h_out = np.deg2rad(100)
++    a = assess_join(angle, h_in, h_out, 0.10, 0.0, 100.0, 100.0,
++                    max_kink_deg=30, min_normal_component=0.2)
++    assert a is not None
++    assert abs(a.kink_deg - 20.0) < 1e-8
++    assert abs(a.D_prev_normal / a.normal_in - 100.0) < 1e-8
++    assert abs(a.D_next_normal / a.normal_out - 100.0) < 1e-8
++    assert a.max_boundary_parallel_shift_m >= 0
++    assert a.max_vertical_shift_m > 0
++
++
++def test_nearly_parallel_boundary_crossing_is_rejected_not_clamped():
++    # With a horizontal grid line and a road travelling along it, the normal
++    # component is zero and the shear equations are ill-conditioned.
++    assert assess_join(0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 100.0) is None
++    a, b = join_shears([0, 0], 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 100.0)
++    assert a is None and b is None
++
++
++def test_join_shear_maps_both_sides_to_same_boundary_tangent_and_grade():
++    line = 0.0
++    h_in, h_out = np.deg2rad(80), np.deg2rad(100)
++    g_in, g_out = 0.10, 0.0
++    prev, nxt = join_shears([0, 0], line, h_in, h_out, g_in, g_out,
++                            100.0, 100.0, max_kink_deg=30)
++    assert prev is not None and nxt is not None
++
++    eps = 1e-3
++    u_in = np.array([np.cos(h_in), np.sin(h_in)])
++    u_out = np.array([np.cos(h_out), np.sin(h_out)])
++    before = np.array([[-eps * u_in[0], -eps * u_in[1], -eps * g_in], [0, 0, 0]])
++    after = np.array([[0, 0, 0], [eps * u_out[0], eps * u_out[1], eps * g_out]])
++    mapped_before = prev.apply(before)
++    mapped_after = nxt.apply(after)
++
++    t_in = (mapped_before[1] - mapped_before[0]) / eps
++    t_out = (mapped_after[1] - mapped_after[0]) / eps
++    heading_target = np.deg2rad(90)
++    assert abs(np.arctan2(t_in[1], t_in[0]) - heading_target) < 1.5e-3
++    assert abs(np.arctan2(t_out[1], t_out[0]) - heading_target) < 1.5e-3
++    assert abs(t_in[2] / np.hypot(t_in[0], t_in[1]) - 0.05) < 1.5e-3
++    assert abs(t_out[2] / np.hypot(t_out[0], t_out[1]) - 0.05) < 1.5e-3
++
++
++def test_join_rejects_heading_kink_over_configured_limit():
++    assert assess_join(np.pi / 2, np.deg2rad(60), np.deg2rad(120),
++                       0, 0, 100, 100, max_kink_deg=30) is None
++
++
++def test_join_grade_is_matched_after_horizontal_shear_changes_speed():
++    # Exercise asymmetric crossing angles: the horizontal shear changes
++    # horizontal speed, so checking dz per source-distance is insufficient.
++    rng = np.random.default_rng(1847)
++    checked = 0
++    for _ in range(500):
++        line = rng.uniform(-np.pi, np.pi)
++        e = np.array([np.cos(line), np.sin(line)])
++        n = np.array([-e[1], e[0]])
++        if rng.random() < 0.5:
++            n = -n
++        a_in, a_out = rng.uniform(-1.25, 1.25, size=2)
++        u_in = np.cos(a_in) * n + np.sin(a_in) * e
++        u_out = np.cos(a_out) * n + np.sin(a_out) * e
++        h_in = np.arctan2(u_in[1], u_in[0])
++        h_out = np.arctan2(u_out[1], u_out[0])
++        g_in, g_out = rng.uniform(-0.18, 0.18, size=2)
++        prev, nxt = join_shears([0.0, 0.0], line, h_in, h_out,
++                                g_in, g_out, 100.0, 100.0,
++                                max_kink_deg=160.0, min_normal_component=0.2)
++        if prev is None:
++            continue
++
++        target_a = (a_in + a_out) * 0.5
++        target_dir = np.sin(target_a) * e + np.cos(target_a) * n
++        eps = 1e-5
++        before = np.array([[-eps * u_in[0], -eps * u_in[1], -eps * g_in],
++                           [0.0, 0.0, 0.0]])
++        after = np.array([[0.0, 0.0, 0.0],
++                          [eps * u_out[0], eps * u_out[1], eps * g_out]])
++        t_in = (prev.apply(before)[1] - prev.apply(before)[0]) / eps
++        t_out = (nxt.apply(after)[1] - nxt.apply(after)[0]) / eps
++
++        # Both transformed paths must have the chosen heading and mean grade
++        # when grade is measured against transformed horizontal arclength.
++        for tangent in (t_in, t_out):
++            heading_error = np.arctan2(
++                target_dir[0] * tangent[1] - target_dir[1] * tangent[0],
++                target_dir @ tangent[:2],
++            )
++            grade_after = tangent[2] / np.linalg.norm(tangent[:2])
++            assert abs(heading_error) < 2e-5
++            assert grade_after == pytest.approx((g_in + g_out) * 0.5, abs=2e-5)
++        checked += 1
++    assert checked >= 100
+diff --git a/tests/test_splines.py b/tests/test_splines.py
+new file mode 100644
+index 0000000..4ef4f4e
+--- /dev/null
++++ b/tests/test_splines.py
+@@ -0,0 +1,133 @@
++import numpy as np
++import pytest
++
++from stagegen.extract.splines import (
++    CIM_CONSTANT,
++    CIM_CURVE_USER,
++    CIM_LINEAR,
++    SplineCurve,
++    sample_spline,
++)
++
++
++def curve(positions, keys=None, leave=None, arrive=None, modes=None,
++          is_looped=False, loop_key_offset=0.0):
++    positions = np.asarray(positions, dtype=np.float64)
++    n = len(positions)
++    return SplineCurve(
++        np.arange(n, dtype=np.float64) if keys is None else np.asarray(keys, dtype=np.float64),
++        positions,
++        np.zeros((n, 3), dtype=np.float64) if arrive is None else np.asarray(arrive, dtype=np.float64),
++        np.zeros((n, 3), dtype=np.float64) if leave is None else np.asarray(leave, dtype=np.float64),
++        np.full(n, CIM_LINEAR, dtype=np.uint8) if modes is None else np.asarray(modes, dtype=np.uint8),
++        is_looped,
++        loop_key_offset,
++    )
++
++
++def test_linear_interpolation_ignores_tangents_and_respects_step():
++    c = curve([[0, 0, 0], [10, 0, 0]], leave=[[100, 0, 0], [0, 0, 0]])
++    sampled = sample_spline(c, step_cm=3)
++    assert np.allclose(sampled[[0, -1]], [[0, 0, 0], [10, 0, 0]])
++    assert np.all(np.diff(sampled[:, 0]) <= 3.0 + 1e-9)
++    assert np.allclose(sampled[:, 1:], 0)
++
++
++def test_cubic_tangents_are_scaled_by_nonuniform_input_key_delta():
++    c = curve(
++        [[0, 0, 0], [10, 0, 0]],
++        keys=[2, 4],
++        leave=[[1, 0, 0], [0, 0, 0]],
++        arrive=[[0, 0, 0], [0, 0, 0]],
++        modes=[CIM_CURVE_USER, CIM_CURVE_USER],
++    )
++    sampled = sample_spline(c, step_cm=2, tolerance_cm=0.1)
++    # The de Casteljau split includes t=0.5. Hermite with M0=LeaveTangent*2
++    # evaluates to 5.25 cm; omitting the input-key delta would give 5.125 cm.
++    midpoint = sampled[np.argmin(np.abs(sampled[:, 0] - 5.25))]
++    assert np.allclose(midpoint, [5.25, 0, 0], atol=1e-8)
++
++
++def test_loop_key_offset_is_the_final_segment_interval_not_total_curve_span():
++    c = curve(
++        [[0, 0, 0], [10, 0, 0]],
++        keys=[5, 10],
++        modes=[CIM_LINEAR, CIM_LINEAR],
++        is_looped=True,
++        loop_key_offset=2.0,
++    )
++    sampled = sample_spline(c, step_cm=2)
++    assert np.allclose(sampled[0], sampled[-1])
++    assert np.allclose(sampled[-1], [0, 0, 0])
++
++
++def test_discontinuous_constant_curve_is_rejected_not_turned_into_a_ramp():
++    c = curve([[0, 0, 0], [10, 0, 0]], modes=[CIM_CONSTANT, CIM_LINEAR])
++    with pytest.raises(ValueError, match="constant spline segment 0 is discontinuous"):
++        sample_spline(c)
++
++
++def test_equal_value_constant_segment_is_safe_and_deduplicated():
++    c = curve([[0, 0, 0], [0, 0, 0], [10, 0, 0]], modes=[CIM_CONSTANT, CIM_LINEAR, CIM_LINEAR])
++    sampled = sample_spline(c, step_cm=5)
++    assert np.allclose(sampled[0], [0, 0, 0])
++    assert np.allclose(sampled[-1], [10, 0, 0])
++    assert not np.any(np.linalg.norm(np.diff(sampled, axis=0), axis=1) == 0)
++
++
++def test_bad_shapes_and_nonmonotonic_keys_are_rejected():
++    bad = SplineCurve(
++        np.array([0, 0]), np.array([[0, 0, 0], [1, 0, 0]]),
++        np.zeros((2, 3)), np.zeros((2, 3)), np.array([0, 0], dtype=np.uint8)
++    )
++    with pytest.raises(ValueError, match="strictly increasing"):
++        sample_spline(bad)
++
++    bad_shape = SplineCurve(
++        np.array([0]), np.array([[0, 0, 0]]), np.zeros((1, 3)),
++        np.zeros((1, 3)), np.array([0, 0], dtype=np.uint8)
++    )
++    with pytest.raises(ValueError, match="inconsistent shapes"):
++        sample_spline(bad_shape)
++
++
++def _header(indices):
++    # Test-only encoder for one contiguous unversioned-property fragment.
++    indices = list(indices)
++    assert indices == list(range(indices[0], indices[-1] + 1))
++    skip = indices[0]
++    count = len(indices)
++    return __import__("struct").pack("<H", skip | (count << 9) | (1 << 8))
++
++
++def test_reader_preserves_curve_modes_loop_flag_and_loop_interval():
++    import struct
++    from types import SimpleNamespace
++    from stagegen.extract.splines import read_spline_curve
++
++    data = bytearray()
++    data += _header([2])               # DMSplineComponent: SplineCurves
++    data += _header([0])               # FSplineCurves: Position
++    data += _header([0, 1, 2])         # FInterpCurveVector: Points, bIsLooped, LoopKeyOffset
++    data += struct.pack("<I", 2)
++    point_values = [
++        (1.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), CIM_CURVE_USER),
++        (2.0, (10.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 0.0), CIM_LINEAR),
++    ]
++    for key, pos, arrive, leave, mode in point_values:
++        data += _header([0, 1, 2, 3, 4])
++        data += struct.pack("<f", key)
++        for vec in (pos, arrive, leave):
++            data += struct.pack("<ddd", *vec)
++        data += struct.pack("<B", mode)
++    data += struct.pack("<?f", True, 0.5)
++
++    fake = SimpleNamespace(
++        d=bytes(data),
++        exports=[SimpleNamespace(name="CenterSpline", data_offset=0)],
++    )
++    decoded = read_spline_curve(fake, "CenterSpline")
++    assert decoded.is_looped is True
++    assert decoded.loop_key_offset == pytest.approx(0.5)
++    assert decoded.interp_modes.tolist() == [CIM_CURVE_USER, CIM_LINEAR]
++    assert decoded.input_keys.tolist() == [1.0, 2.0]
+diff --git a/tests/test_tile_join_rules.py b/tests/test_tile_join_rules.py
+new file mode 100644
+index 0000000..f85ed7b
+--- /dev/null
++++ b/tests/test_tile_join_rules.py
+@@ -0,0 +1,43 @@
++import numpy as np
++import pytest
++
++from stagegen.model import Pacenote, Segment, SourceStage
++from stagegen.tiles import Cut, Range, TileSearchConfig, sequence_state
++
++
++def _sequence_fixture(join_line=np.pi / 2, join_heading=np.pi / 2,
++                      join_grade=0.0, join_width=7.0, prev_heading=np.pi / 2):
++    points = np.column_stack((np.arange(376) * 2.0, np.zeros(376), np.zeros(376)))
++    stage = SourceStage("TestStage", "test", "gravel", points,
++                        np.full(len(points), 7.0), [Pacenote(20.0, "3 left")])
++    cuts = [
++        Cut(0.0, np.array([0.0, 0.0, 0.0]), 0.0, np.pi / 2, 0.0, 7.0, "start"),
++        Cut(250.0, np.array([0.0, 250.0, 0.0]), 0.0, prev_heading, 0.0, 7.0, "cross"),
++        Cut(500.0, np.array([500.0, 0.0, 0.0]), join_line, join_heading, join_grade, join_width, "cross"),
++        Cut(750.0, np.array([500.0, 250.0, 0.0]), 0.0, np.pi / 2, 0.0, 7.0, "finish"),
++    ]
++    r0 = Range("TestStage#0-1", 0, 1, frozenset({(0, 0)}), Segment("r0", stage, 0, 125, 2.0))
++    r1 = Range("TestStage#2-3", 2, 3, frozenset({(0, 1)}), Segment("r1", stage, 250, 375, 2.0))
++    cfg = TileSearchConfig(target_length=500.0, min_len=200.0, max_len=300.0,
++                           max_uses=1, smooth_kink_deg=45.0, smooth_grade=0.12)
++    return stage, cuts, [r0, r1], cfg
++
++
++def test_manual_sequence_rejects_kink_beyond_smoothing_limit_without_180_degree_fallback():
++    stage, cuts, ranges, cfg = _sequence_fixture(join_line=np.pi / 2, join_heading=0.0, prev_heading=np.deg2rad(30))
++    with pytest.raises(ValueError, match="cannot join within the configured 45 degree limit"):
++        sequence_state(stage, ranges, cuts, cfg, [(0, 1, False), (2, 3, False)])
++
++
++def test_manual_sequence_rejects_grade_step_above_smoothing_limit():
++    stage, cuts, ranges, cfg = _sequence_fixture(join_line=0.0, join_heading=np.pi / 2,
++                                                join_grade=0.13)
++    with pytest.raises(ValueError, match="grade discontinuity"):
++        sequence_state(stage, ranges, cuts, cfg, [(0, 1, False), (2, 3, False)])
++
++
++def test_manual_sequence_rejects_road_width_step_above_limit():
++    stage, cuts, ranges, cfg = _sequence_fixture(join_line=0.0, join_heading=np.pi / 2,
++                                                join_width=9.1)
++    with pytest.raises(ValueError, match="changes road width"):
++        sequence_state(stage, ranges, cuts, cfg, [(0, 1, False), (2, 3, False)])
