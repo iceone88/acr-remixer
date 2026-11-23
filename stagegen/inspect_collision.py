@@ -219,7 +219,10 @@ def inspect_one(fs, level: str, out_dir: str, corridor_m: float = 30.0,
             # raycast. It helps rank which source meshes lie along the route.
             centres = p.mean(axis=1)
             distances, nearest = route_tree.query(centres[:, :2], k=1)
-            nearest_s = nearest.astype(np.float64) * route_step
+            # Route station is the actual cumulative XY arclength stored by SourceStage;
+            # multiplying a sample index by the median sample interval drifts on
+            # resampled curves and at fractional endpoints.
+            nearest_s = ws.stage.station[nearest]
             row.update({
                 "min_route_distance_m": float(np.min(distances)),
                 "p50_route_distance_m": float(np.median(distances)),
@@ -312,7 +315,7 @@ def inspect_one(fs, level: str, out_dir: str, corridor_m: float = 30.0,
         "stage": level,
         "source_map": ws.main,
         "baked_data_asset": ws.baked,
-        "route_length_m": float(np.linalg.norm(np.diff(route, axis=0), axis=1).sum()),
+        "route_length_m": float(ws.stage.station[-1]),
         "route_sample_step_m": route_step,
         "route_sample_count": int(len(route)),
         "route_centreline_m": np.round(route, 3).tolist(),

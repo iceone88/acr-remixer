@@ -131,6 +131,50 @@ def assess_join(line_angle: float, h_prev: float, h_next: float,
                           max_boundary_parallel, max_vertical, reach_prev_m, reach_next_m)
 
 
+def source_aligned_edge_interval(coordinate: float, grid_origin: float, cell: float) -> tuple[float, float]:
+    """Finite tile-edge interval measured along the transformed source +axis.
+
+    The source grid's positive axis is mapped to ``e`` by the piece's rigid
+    rotation.  Thus the scalar interval remains ``[edge_start-coordinate,
+    edge_end-coordinate]`` even when that transformed ``e`` points toward a
+    negative world X or Y direction.
+    """
+    if not all(np.isfinite(v) for v in (coordinate, grid_origin, cell)) or cell <= 0:
+        raise ValueError("tile edge coordinate/origin must be finite and cell positive")
+    edge_start = grid_origin + np.floor((coordinate - grid_origin) / cell) * cell
+    q0 = float(edge_start - coordinate)
+    return q0, q0 + float(cell)
+
+
+def seam_edge_weights(points: np.ndarray, p0: np.ndarray, e: np.ndarray,
+                      along_min: float, along_max: float, width: float) -> tuple[np.ndarray, np.ndarray]:
+    """Smooth blending weights only inside a finite, actual tile seam band.
+
+    ``p0`` is a point on the shared tile edge, ``e`` its unit direction, and
+    ``along_min/max`` bound the edge segment in metres from ``p0``.  Points
+    outside that finite edge or farther than ``width`` from it get zero weight.
+    This prevents unrelated roads (including stacked or crossing routes) from
+    being treated as terrain neighbours merely because they are close in XY.
+    """
+    P = np.atleast_2d(np.asarray(points, dtype=np.float64))
+    p0 = np.asarray(p0, dtype=np.float64)[:2]
+    e = np.asarray(e, dtype=np.float64)[:2]
+    en = float(np.linalg.norm(e))
+    if not np.isfinite(width) or width <= 0 or en <= 1e-12:
+        return np.zeros(len(P), dtype=bool), np.zeros(len(P), dtype=np.float64)
+    e = e / en
+    n = np.array([-e[1], e[0]])
+    delta = P[:, :2] - p0
+    q = delta @ e
+    d = delta @ n
+    mask = ((q >= min(along_min, along_max)) & (q <= max(along_min, along_max)) &
+            (np.abs(d) < width))
+    w = np.clip(1.0 - np.abs(d) / width, 0.0, 1.0)
+    w = w * w * (3.0 - 2.0 * w)
+    w = np.where(mask, w, 0.0)
+    return mask, w
+
+
 @dataclass(frozen=True)
 class Shear:
     p0: np.ndarray        # (2,) a point on the join line (layout frame, m)
@@ -168,12 +212,24 @@ class Shear:
             P[:, 2] += g * self.Az
         return P
 
-    def yaw(self, xy: np.ndarray) -> np.ndarray:
-        """Local map yaw change of directions along the boundary normal."""
-        d = self._d(xy)
-        dg = np.where(d > 0, _dg(np.maximum(d, 0), self.D), 0.0)
-        sense = np.sign(self.n[0] * self.e[1] - self.n[1] * self.e[0])
-        return np.arctan(self.A * dg) * sense
+    def yaw(self, xy: np.ndarray, heading: np.ndarray | float) -> np.ndarray:
+        """Yaw change for the supplied heading under the shear Jacobian.
+
+        For F(P)=P+g(d) A e and d=n·(P-p0), the horizontal Jacobian is
+        J=I+A g'(d) e n^T.  A direction v must therefore map to Jv; the
+        normal-only shortcut is correct only when v is parallel to n.
+        """
+        P = np.atleast_2d(np.asarray(xy, dtype=np.float64))
+        h = np.broadcast_to(np.asarray(heading, dtype=np.float64), (len(P),))
+        d = self._d(P)
+        v = np.column_stack([np.cos(h), np.sin(h)])
+        # The map is only piecewise differentiable at the seam. Use the
+        # inward derivative g'(0+) for directions entering this piece, and
+        # the identity derivative for directions leaving it.
+        inward = (d > 0) | ((d == 0) & ((v @ self.n) > 0))
+        dg = np.where(inward, _dg(np.maximum(d, 0), self.D), 0.0)
+        mapped = v + (self.A * dg * (v @ self.n))[:, None] * self.e[None, :]
+        return np.arctan2(mapped[:, 1], mapped[:, 0]) - h
 
 
 def join_shears(p0, line_angle: float, h_prev: float, h_next: float,

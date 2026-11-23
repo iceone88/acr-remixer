@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .geometry import headings, rot_z, wrap_angle
+from .geometry import grade as geometry_grade, headings, rot_z, wrap_angle
 from .model import Piece, Segment, SourceStage
 
 TILE_RE = re.compile(rb"Track(\d\d)(\d\d)")
@@ -83,55 +83,84 @@ class Range:
 
 
 def find_cuts(stage: SourceStage, grid: TileGrid, step: float, min_gap: float = 30.0) -> list[Cut]:
+    """Find exact tile-boundary intersections using the source station array."""
     P = stage.points
+    station = stage.station
     tid = grid.of(P[:, :2])
-    hd = headings(P)
-    g = np.gradient(P[:, 2]) / step
+    hd = headings(P, station)
+    g = geometry_grade(P, station, window=9)
     raw = []
     for i in np.where(np.any(tid[1:] != tid[:-1], axis=1))[0]:
         a, b = tid[i], tid[i + 1]
         if (a != b).sum() != 1:
-            continue                                     # through a corner: no single grid line
+            continue
         if tuple(a) not in grid.tiles or tuple(b) not in grid.tiles:
             continue
-        if a[1] != b[1]:                                 # ix changed: line x = const (runs along y)
+        if a[1] != b[1]:
             X = grid.x0 + grid.cell * max(a[1], b[1])
-            t = (X - P[i, 0]) / (P[i + 1, 0] - P[i, 0])
+            den = P[i + 1, 0] - P[i, 0]
+            if abs(den) < 1e-12:
+                continue
+            t = (X - P[i, 0]) / den
             line = np.pi / 2
         else:
             Y = grid.y0 + grid.cell * max(a[0], b[0])
-            t = (Y - P[i, 1]) / (P[i + 1, 1] - P[i, 1])
+            den = P[i + 1, 1] - P[i, 1]
+            if abs(den) < 1e-12:
+                continue
+            t = (Y - P[i, 1]) / den
             line = 0.0
+        if not (0.0 <= t <= 1.0):
+            continue
         p = P[i] + t * (P[i + 1] - P[i])
-        raw.append(Cut(float((i + t) * step), p, line, float(hd[i]), float(np.mean(g[max(0, i - 8): i + 9])),
-                       float(stage.width[i])))
+        h1 = np.unwrap(hd[i:i + 2])
+        h = float(h1[0] + t * (h1[1] - h1[0]))
+        gg = float(g[i] + t * (g[i + 1] - g[i]))
+        ww = float(stage.width[i] + t * (stage.width[i + 1] - stage.width[i]))
+        ss = float(station[i] + t * (station[i + 1] - station[i]))
+        raw.append(Cut(ss, p, line, h, gg, ww))
     cuts = [c for j, c in enumerate(raw)
             if (j == 0 or c.s - raw[j - 1].s > min_gap) and (j == len(raw) - 1 or raw[j + 1].s - c.s > min_gap)]
-    L = (len(P) - 1) * step
-    start = Cut(0.0, P[0], 0.0, float(hd[0]), float(g[:9].mean()), float(stage.width[0]), "start")
-    fin = Cut(L, P[-1], 0.0, float(hd[-1]), float(g[-9:].mean()), float(stage.width[-1]), "finish")
+    L = float(station[-1])
+    start = Cut(0.0, P[0].copy(), 0.0, float(hd[0]), float(g[0]), float(stage.width[0]), "start")
+    fin = Cut(L, P[-1].copy(), 0.0, float(hd[-1]), float(g[-1]), float(stage.width[-1]), "finish")
     return [start] + [c for c in cuts if 40 < c.s < L - 40] + [fin]
 
 
 def make_ranges(stage: SourceStage, grid: TileGrid, cuts: list[Cut], step: float,
                 min_len: float, max_len: float) -> list[Range]:
+    """Build segments whose geometry includes exact, interpolated cut endpoints."""
     P = stage.points
-    tid = grid.of(P[:, :2])
+    station = stage.station
     out = []
     for a in range(len(cuts)):
         for b in range(a + 1, len(cuts)):
-            L = cuts[b].s - cuts[a].s
-            if L > max_len:
+            ca, cb = cuts[a], cuts[b]
+            length = cb.s - ca.s
+            if length > max_len:
                 break
-            if L < min_len and not (cuts[a].kind == "start" or cuts[b].kind == "finish"):
+            if length < min_len and not (ca.kind == "start" or cb.kind == "finish"):
                 continue
-            i0 = int(np.ceil(cuts[a].s / step))
-            i1 = min(int(np.floor(cuts[b].s / step)), len(P) - 1)
-            if i1 - i0 < 5:
+            i0 = max(0, int(np.searchsorted(station, ca.s, side="right")) - 1)
+            i1 = min(len(P) - 1, int(np.searchsorted(station, cb.s, side="left")))
+            seg = Segment(
+                f"{stage.name}#{a}-{b}", stage, i0, i1, step,
+                start_s=ca.s, end_s=cb.s,
+                start_point=ca.p, end_point=cb.p,
+                start_width=ca.width, end_width=cb.width,
+            )
+            pts = seg.points(False)
+            if len(pts) < 6:
                 continue
-            tiles = frozenset(map(tuple, tid[i0: i1 + 1]))
+            # Tile membership is decided by interval midpoints, not exact
+            # boundary points (whose floor-based cell assignment is ambiguous).
+            mids = (pts[:-1, :2] + pts[1:, :2]) * 0.5
+            tiles = frozenset(map(tuple, grid.of(mids)))
+            if not tiles:
+                continue
             rid = f"{stage.name}#{a}-{b}"
-            out.append(Range(rid, a, b, tiles, Segment(rid, stage, i0, i1, step)))
+            seg.id = rid
+            out.append(Range(rid, a, b, tiles, seg))
     return out
 
 
@@ -185,6 +214,9 @@ class TState:
     entry_grade: float = 0.0
     ltiles: tuple = ()             # per layer: tiles used in it
     lspans: tuple = ()             # per layer: source (s0, s1) spans used in it
+    max_geometry_mismatch: float = 0.0  # worst normalized join mismatch in the chain
+    geometry_penalty: float = 0.0        # sum of squared normalized join mismatches
+    preference_penalty: float = 0.0      # novelty, variety and repeat preference only
 
     def chain(self):
         s = self
@@ -199,7 +231,33 @@ class TState:
 
 
 def _coarse(pts, cfg):
-    return pts[:: max(1, int(cfg.coarse_step / cfg.step)), :2]
+    from .geometry import arclength
+    station = arclength(pts)
+    targets = np.arange(0.0, station[-1], max(1.0, cfg.coarse_step))
+    idx = np.searchsorted(station, targets, side="left")
+    idx = np.unique(np.r_[idx, len(pts) - 1].clip(0, len(pts) - 1))
+    return pts[idx, :2]
+
+
+def _normalised_mismatch(value: float, limit: float) -> float:
+    """Absolute mismatch as a fraction of its configured hard limit."""
+    value = abs(float(value))
+    if limit <= 0:
+        return 0.0 if value <= 1e-12 else float("inf")
+    return value / float(limit)
+
+
+def _tile_rank_key(st: TState) -> tuple[float, float, float]:
+    """Geometry-first ranking; preference terms can only break geometric ties.
+
+    The first component minimizes the worst normalized join mismatch, the
+    second minimizes the total squared mismatch per kilometre, and only the
+    third uses novelty/variety/repetition preferences.
+    """
+    km = max(st.length / 1000.0, 0.5)
+    return (float(st.max_geometry_mismatch),
+            float(st.geometry_penalty / km),
+            float(st.preference_penalty / km))
 
 
 def _too_close(st: TState, new_xy: np.ndarray, cfg: TileSearchConfig) -> bool:
@@ -464,6 +522,7 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
         pc = Piece("segment", pts, r.seg.widths(False), r.id, False, 0.0, np.zeros(3), r.seg.pacenotes(False) or [])
         st0 = TState(None, pc, r, r.a, r.b, ext.p.copy(), ext.line, ext.heading, ext.grade, ext.width,
                      ext.s, r.tiles, _coarse(pts, cfg), bias[r.id])
+        st0.preference_penalty = float(bias[r.id])
         st0.ltiles, st0.lspans = _with_layer(st0, 0, r, cuts)
         beam.append(st0)
     finished, near = [], []
@@ -504,16 +563,35 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
                         continue
                     R = rot_z(yaw)
                     follows = (rev == st.piece.reversed) and (r.b if rev else r.a) == st.exit
-                    kd = abs(np.degrees(kink))           # smoothed kinks cost more than small ones
-                    pen = (st.penalty + kd * 0.8 + max(0.0, kd - cfg.max_kink_deg) * 0.8
-                           + 30 * abs(g_in - st.exit_grade) / cfg.max_grade_mismatch
-                           + (cfg.novelty if follows else 0) + bias[r.id] + cfg.repeat_penalty * layer)
+                    kd = abs(np.degrees(kink))
+                    dg = abs(g_in - st.exit_grade)
+                    dw = abs(ent.width - st.exit_width)
+                    # Normalize unlike units by their hard acceptance limits.
+                    # The search ranks this geometric score before any random or
+                    # novelty preference, so variety cannot buy a worse join.
+                    ratios = (
+                        _normalised_mismatch(kd, cfg.max_kink_deg),
+                        _normalised_mismatch(dg, cfg.max_grade_mismatch),
+                        _normalised_mismatch(dw, cfg.max_width_mismatch),
+                    )
+                    step_geometry = float(sum(q * q for q in ratios))
+                    worst_geometry = float(max(ratios))
+                    step_preference = ((cfg.novelty if follows else 0.0)
+                                       + bias[r.id] + cfg.repeat_penalty * layer)
+                    # Retain the historic scalar for compatibility/reporting;
+                    # the actual beam/final ordering uses the separated fields.
+                    legacy_geometry = (kd * 0.8 + max(0.0, kd - cfg.max_kink_deg) * 0.8
+                                       + 30 * dg / max(cfg.max_grade_mismatch, 1e-12))
+                    pen = st.penalty + legacy_geometry + step_preference
                     h_out = ext.heading + (np.pi if rev else 0.0) + yaw
                     pc = Piece("segment", pts, r.seg.widths(rev), r.id, rev, yaw, trans,
                                r.seg.pacenotes(rev) or [])
                     kid = TState(st, pc, r, r.b if rev else r.a, r.a if rev else r.b, R @ ext.p + trans,
                                  ext.line + yaw, h_out, -ext.grade if rev else ext.grade, ext.width, L,
                                  st.tiles | r.tiles, cxy, pen, st.kinks + [float(np.degrees(kink))], layer)
+                    kid.max_geometry_mismatch = max(st.max_geometry_mismatch, worst_geometry)
+                    kid.geometry_penalty = st.geometry_penalty + step_geometry
+                    kid.preference_penalty = st.preference_penalty + step_preference
                     kid.ltiles, kid.lspans = _with_layer(st, layer, r, cuts)
                     kid.entry_heading = float(h_in_of(ent, rev) + yaw)
                     kid.entry_grade = float(g_in)
@@ -524,10 +602,10 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
                     else:
                         near.append(kid)          # complete stage, wrong length: fallback
             rnd.shuffle(kids)
-            kids.sort(key=lambda s: s.penalty / max(s.length / 1000, 0.5))
+            kids.sort(key=_tile_rank_key)
             nxt += kids[: cfg.branch_per_state]
         seen, uniq = set(), []
-        for s in sorted(nxt, key=lambda s: s.penalty / max(s.length / 1000, 0.5)):
+        for s in sorted(nxt, key=_tile_rank_key):
             key = (s.rng.id, s.piece.reversed, round(s.exit_p[0] / 40), round(s.exit_p[1] / 40))
             if key not in seen:
                 seen.add(key)
@@ -540,5 +618,5 @@ def tile_search(stage: SourceStage, ranges: list[Range], cuts: list[Cut], cfg: T
         if not near:
             return None
         return min(near, key=lambda s: (round(abs(s.length - cfg.target_length) / 250),
-                                        s.penalty / max(s.length / 1000, 0.5)))
-    return min(finished, key=lambda s: s.penalty / max(s.length / 1000, 0.5))
+                                        *_tile_rank_key(s)))
+    return min(finished, key=_tile_rank_key)
