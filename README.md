@@ -4,7 +4,7 @@
 [![Latest release](https://img.shields.io/github/v/release/vale981/acr-remixer?label=release)](../../releases/latest)
 [![Nightly build](https://github.com/vale981/acr-remixer/actions/workflows/nightly.yml/badge.svg)](../../actions/workflows/nightly.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![REUSE compliant](https://img.shields.io/badge/REUSE-compliant-green)](https://reuse.software)
+[![REUSE status](https://api.reuse.software/badge/github.com/vale981/acr-remixer)](https://api.reuse.software/info/github.com/vale981/acr-remixer)
 ![Windows](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows)
 ![Assetto Corsa Rally](https://img.shields.io/badge/game-Assetto%20Corsa%20Rally%20(unofficial)-c0392b)
 [![Contributions welcome](https://img.shields.io/badge/contributions-welcome-orange)](#contributing)
