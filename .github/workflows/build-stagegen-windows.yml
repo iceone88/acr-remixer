@@ -1,0 +1,63 @@
+name: Build StageGen Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "stagegen/**"
+      - "tests/test_station_and_join_math.py"
+      - "stagegen_entry.py"
+      - "requirements-stagegen-build.txt"
+      - ".github/workflows/build-stagegen-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up 64-bit Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Install build and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-stagegen-build.txt
+
+      - name: Run StageGen regression tests
+        run: python -m pytest -q tests/test_station_and_join_math.py
+
+      - name: Build one-file Windows executable
+        shell: pwsh
+        run: >-
+          python -m PyInstaller
+          --noconfirm
+          --clean
+          --onefile
+          --console
+          --name acr-stagegen
+          --collect-submodules stagegen
+          --collect-all numpy
+          --collect-all scipy
+          --collect-all matplotlib
+          --add-data "stagegen/build/empty_mod.pak;stagegen/build"
+          stagegen_entry.py
+
+      - name: Smoke-test executable
+        shell: pwsh
+        run: .\dist\acr-stagegen.exe --help
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: acr-stagegen-windows-x64
+          path: dist/acr-stagegen.exe
+          if-no-files-found: error
+          retention-days: 30
