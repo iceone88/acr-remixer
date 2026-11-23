@@ -1139,3 +1139,16 @@ index 0000000..f85ed7b
 +                                                join_width=9.1)
 +    with pytest.raises(ValueError, match="changes road width"):
 +        sequence_state(stage, ranges, cuts, cfg, [(0, 1, False), (2, 3, False)])
+--- a/tests/test_gamefs_stagegen.py
++++ b/tests/test_gamefs_stagegen.py
+@@ -11,6 +11,10 @@
+             self.chunk_index = {}
+ 
+     def fake_glob(pattern):
++        # os.path.join() uses backslashes on Windows and forward slashes on
++        # POSIX. Normalize only the fixture's pattern matching so this test
++        # exercises the same GameFS behaviour on both platforms.
++        pattern = pattern.replace("\\", "/")
+         if pattern.endswith("~mods/*.utoc"):
+             return [
+                 r"C:\\Game\\Paks\\~mods\\third-party.utoc",

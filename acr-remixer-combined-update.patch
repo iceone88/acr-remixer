@@ -1865,10 +1865,10 @@ index 0000000..a14ed4c
 +    np.testing.assert_allclose(closest, [[1.0, 0.0, 0.0]], atol=1e-8)
 diff --git a/tests/test_gamefs_stagegen.py b/tests/test_gamefs_stagegen.py
 new file mode 100644
-index 0000000..beaefca
+index 0000000..0049422
 --- /dev/null
 +++ b/tests/test_gamefs_stagegen.py
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,43 @@
 +from stagegen.extract import iostore
 +
 +
@@ -1882,6 +1882,10 @@ index 0000000..beaefca
 +            self.chunk_index = {}
 +
 +    def fake_glob(pattern):
++        # os.path.join() uses backslashes on Windows and forward slashes on
++        # POSIX. Normalize only the fixture's pattern matching so this test
++        # exercises the same GameFS behaviour on both platforms.
++        pattern = pattern.replace("\\", "/")
 +        if pattern.endswith("~mods/*.utoc"):
 +            return [
 +                r"C:\\Game\\Paks\\~mods\\third-party.utoc",
