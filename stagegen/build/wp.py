@@ -737,6 +737,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                         rep.moved["foliage instances left out"] += nh
         comps = [c for c in decode_components(pk, rules) if c.root and c.loc is not None]
         pcg_roots: dict[int, np.ndarray] = {}
+        pcg_root_comp: dict[int, int] = {}      # foliage owner actor -> its root component export
         giant = _giant_mesh_components(fs, pk, cfg.giant_mesh_m)
 
         def put(c, loc, rot, kind=None):
@@ -809,6 +810,7 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 continue
             if c.root and owner.startswith(FOLIAGE_OWNERS):
                 pcg_roots[c.owner] = c.loc.copy()
+                pcg_root_comp[c.owner] = c.export
             if owner.startswith(SKIP_OWNERS) or any(w in owner for w in SKIP_WORDS):
                 continue
             kind = owner.split("_UAID")[0].rstrip("0123456789_")
@@ -868,6 +870,10 @@ def build_wp_stage(layout: Layout, best: TState, cuts: list[Cut], grid: TileGrid
                 if st.get("n"):
                     payl[i] = nb
                     n_moved += st["kept"]
+                    if st["kept"] and e.outer in pcg_root_comp:
+                        # instances are relative to the owner's root: in a copy
+                        # it must stay where it is, not be parked with the unused
+                        touched.add(pcg_root_comp[e.outer])
                     rep.moved["forest trees" if layer == 0 else "forest trees (copies)"] += st["kept"]
                     if layer == 0:
                         rep.moved["forest trees hidden"] += st["n"] - st["kept"]

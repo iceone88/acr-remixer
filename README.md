@@ -123,12 +123,11 @@ A camera tour through a generated stage, from the start (top left) to the finish
 - **Game updates** may break it until ACR Remixer is updated.
 - Known rough edges: the service park can look odd, small seams at the joins,
   and a few distant hills may look out of place.
-- **Repeated pieces** (*Repeats* above 1, or a *Sequence* that uses a piece more
-  than once): some stretches of the second and later uses have less or no
-  foliage, because part of the vegetation exists only once in the game and
-  isn't copied yet. Drivable, just barer.
-- Now and then an object looks **oddly stretched** (graphically interesting,
-  but not intended).
+- **Barrier tape** along the road is left out for now: its poles end up in
+  different pieces and the tape would stretch across the map.
+- **The same piece several times close together** (e.g. a practice sequence):
+  where the copies lie side by side at different heights, the edge of the
+  higher terrain can show as a steep wall in the distance.
 - **Very long stages** may have short stretches without background ground far
   below the road (the build log names them under *filler coverage*).
 
