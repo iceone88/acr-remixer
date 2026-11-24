@@ -72,24 +72,38 @@ BUILD_CUT = CutConfig(max_curvature=1 / 90, max_grade_change=0.05, window_m=16.0
 
 def _segments(a) -> int:
     """The level's pieces between tile crossings, for --sequence."""
+    import contextlib
+    import io
     import json
     from .build import writers as W
     from .extract.iostore import GameFS
     from .extract.real import DEFAULT_PAKS, load_wp_source
     from .extract.zen import Package
     from .tiles import TileGrid, TileSearchConfig, find_cuts, make_ranges, segment_table
-    fs = GameFS(a.paks or DEFAULT_PAKS, include_mods=False)
-    ws = load_wp_source(fs, a.level)
-    meshes, *_ = W.read_baked_raw(Package(fs.read(ws.baked)))
-    grid = TileGrid.from_baked(meshes)
-    cuts = find_cuts(ws.stage, grid, 2.0)
-    cfg = TileSearchConfig()
-    tab = segment_table(ws.stage, make_ranges(ws.stage, grid, cuts, 2.0, cfg.min_len, cfg.max_len), cuts)
+
+    def extract_table():
+        fs = GameFS(a.paks or DEFAULT_PAKS, include_mods=False)
+        ws = load_wp_source(fs, a.level)
+        meshes, *_ = W.read_baked_raw(Package(fs.read(ws.baked)))
+        grid = TileGrid.from_baked(meshes)
+        cuts = find_cuts(ws.stage, grid, 2.0)
+        cfg = TileSearchConfig()
+        ranges = make_ranges(ws.stage, grid, cuts, 2.0, cfg.min_len, cfg.max_len)
+        return segment_table(ws.stage, ranges, cuts)
+
     if a.json:
-        print(json.dumps(tab))
+        # GUI mode needs stdout to contain exactly one JSON document. The
+        # extraction helpers print useful diagnostics for interactive CLI use;
+        # keep those out of the machine-readable response (errors still surface).
+        with contextlib.redirect_stdout(io.StringIO()):
+            tab = extract_table()
+        print(json.dumps(tab, separators=(",", ":")))
         return 0
-    print(f"{a.level}: cuts 0 (start) .. {len(cuts) - 1} (finish); a sequence starts with 0-N and ends with N-"
-          f"{len(cuts) - 1}; 'r' drives a piece backwards")
+
+    tab = extract_table()
+    final_cut = len(tab["cuts"]) - 1
+    print(f"{a.level}: cuts 0 (start) .. {final_cut} (finish); a sequence starts with 0-N and ends with N-"
+          f"{final_cut}; 'r' drives a piece backwards")
     for p in tab["pieces"]:
         print(f"  {p['id']:>7}  {p['length']:6.0f} m" + ("" if p["reversible"] else "   (start/finish, forwards only)"))
     return 0
