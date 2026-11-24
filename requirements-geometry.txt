@@ -1,0 +1,6 @@
+# Optional cloud geometry-analysis environment.
+# Deliberately separate from requirements.txt and requirements-stagegen-build.txt:
+# Open3D is a diagnostic/development tool, not part of the released ACR Remixer EXE.
+numpy>=2.0,<3
+open3d==0.20.0
+pytest>=8,<10

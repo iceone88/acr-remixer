@@ -1,0 +1,9 @@
+# Synthetic test fixture only. Units: metres. Z is vertical.
+# Flat road upper surface at Z=2, spanning X=[0,10], Y=[-1,1].
+o synthetic_road_surface
+v 0 -1 2
+v 10 -1 2
+v 10 1 2
+v 0 1 2
+f 1 2 3
+f 1 3 4
