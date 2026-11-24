@@ -1,0 +1,170 @@
+name: Cloud 3D geometry diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      use_private_diagnostics:
+        description: "Analyse diagnostics/private-input (only in a PRIVATE repository)"
+        required: false
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - "requirements-geometry.txt"
+      - "tools/geometry/**"
+      - "tools/blender/**"
+      - "tests/test_geometry_tools.py"
+      - "tests/fixtures/geometry/**"
+      - ".github/workflows/geometry-tools-smoke.yml"
+  push:
+    paths:
+      - "requirements-geometry.txt"
+      - "tools/geometry/**"
+      - "tools/blender/**"
+      - "tests/test_geometry_tools.py"
+      - "tests/fixtures/geometry/**"
+      - ".github/workflows/geometry-tools-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-geometry-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  geometry-diagnostics:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+          cache: pip
+          cache-dependency-path: requirements-geometry.txt
+
+      - name: Install Open3D geometry environment
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-geometry.txt
+          python -c "import numpy, open3d; print('NumPy', numpy.__version__); print('Open3D', open3d.__version__)"
+
+      - name: Download and verify Blender 5.2.5 LTS
+        shell: pwsh
+        run: |
+          $version = "5.2.5"
+          $baseUrl = "https://download.blender.org/release/Blender5.2"
+          $archiveName = "blender-$version-windows-x64.zip"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
+          $checksumUrl = "$baseUrl/blender-$version.sha256"
+          $archiveUrl = "$baseUrl/$archiveName"
+
+          Write-Host "Downloading $archiveUrl"
+          Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath
+          $checksumText = (Invoke-WebRequest -Uri $checksumUrl).Content
+          $escapedName = [regex]::Escape($archiveName)
+          $checksumLine = ($checksumText -split "`r?`n" | Where-Object { $_ -match $escapedName } | Select-Object -First 1)
+          if (-not $checksumLine) {
+            throw "Could not find the official SHA-256 entry for $archiveName in $checksumUrl"
+          }
+          $checksumMatch = [regex]::Match($checksumLine, "[0-9a-fA-F]{64}")
+          if (-not $checksumMatch.Success) {
+            throw "The official checksum entry for $archiveName did not contain a SHA-256 digest"
+          }
+          $expectedHash = $checksumMatch.Value.ToLowerInvariant()
+          $actualHash = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "Blender SHA-256 mismatch. Expected $expectedHash; received $actualHash"
+          }
+          Write-Host "Blender archive SHA-256 verified: $actualHash"
+
+          $extractRoot = Join-Path $env:RUNNER_TEMP "blender-$version"
+          New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot -Force
+          $blender = Get-ChildItem -Path $extractRoot -Filter "blender.exe" -File -Recurse | Select-Object -First 1
+          if ($null -eq $blender) { throw "blender.exe was not found after extracting the official archive" }
+          "BLENDER_EXE=$($blender.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $blender.FullName --version
+
+      - name: Create artifact directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force artifacts | Out-Null
+
+      - name: Verify Open3D tensor ray casting
+        run: python tools/geometry/open3d_smoke_test.py
+
+      - name: Test mesh inventory and road-ground ray casting
+        run: python -m pytest -q tests/test_geometry_tools.py
+
+      - name: Select synthetic or private diagnostic inputs
+        id: inputs
+        shell: pwsh
+        env:
+          USE_PRIVATE_DIAGNOSTICS: ${{ inputs.use_private_diagnostics }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $usePrivate = "$env:USE_PRIVATE_DIAGNOSTICS".ToLowerInvariant() -eq "true"
+          if ($usePrivate) {
+            $headers = @{
+              Accept = "application/vnd.github+json"
+              Authorization = "Bearer $env:GH_TOKEN"
+              "X-GitHub-Api-Version" = "2022-11-28"
+            }
+            $repoInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY" -Headers $headers
+            $visibility = [string]$repoInfo.visibility
+            if ($visibility -ne "private") {
+              throw "Private diagnostic mode is blocked because this repository is not private. Do not upload ACR-derived meshes to a public repository. Use synthetic fixtures here or copy this toolchain into a private diagnostics repository."
+            }
+            $inputPath = "diagnostics/private-input"
+            if (-not (Test-Path (Join-Path $inputPath "road_surface.obj"))) {
+              throw "Missing $inputPath/road_surface.obj"
+            }
+            if (-not (Test-Path (Join-Path $inputPath "terrain_surface.obj"))) {
+              throw "Missing $inputPath/terrain_surface.obj"
+            }
+            "Using private diagnostic inputs from $inputPath"
+          }
+          else {
+            $inputPath = "tests/fixtures/geometry"
+            "Using synthetic, non-game test meshes from $inputPath"
+          }
+          "input_path=$inputPath" >> $env:GITHUB_OUTPUT
+
+      - name: Create Open3D mesh inventory
+        shell: pwsh
+        run: |
+          python tools/geometry/mesh_inventory.py "${{ steps.inputs.outputs.input_path }}" --json artifacts/mesh_inventory.json --csv artifacts/mesh_inventory.csv
+
+      - name: Compare road upper surface against terrain
+        shell: pwsh
+        run: |
+          $inputPath = "${{ steps.inputs.outputs.input_path }}"
+          $road = Join-Path $inputPath "road_surface.obj"
+          $terrain = Join-Path $inputPath "terrain_surface.obj"
+          if ((Test-Path $road) -and (Test-Path $terrain)) {
+            python tools/geometry/compare_road_ground.py --road $road --terrain $terrain --samples 20000 --max-search 100 --json artifacts/road_ground_report.json --csv artifacts/road_ground_samples.csv
+          } else {
+            "Road/terrain pair not found; mesh inventory will still run." | Tee-Object -FilePath artifacts/road_ground_skipped.txt
+          }
+
+      - name: Inspect OBJ meshes with Blender in background mode
+        shell: pwsh
+        run: |
+          $inputPath = "${{ steps.inputs.outputs.input_path }}"
+          & $env:BLENDER_EXE --background --factory-startup --python-exit-code 1 --python tools/blender/inspect_mesh_exports.py -- --input-dir $inputPath --json artifacts/blender_mesh_inventory.json
+          if ($LASTEXITCODE -ne 0) { throw "Blender background mesh inspection failed with exit code $LASTEXITCODE" }
+
+      - name: Upload reports (source OBJ files are not uploaded)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acr-cloud-geometry-diagnostics-${{ github.run_number }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
