@@ -1,0 +1,1416 @@
+diff --git a/.github/workflows/blender-mesh-bridge.yml b/.github/workflows/blender-mesh-bridge.yml
+new file mode 100644
+index 0000000..c9e4bf6
+--- /dev/null
++++ b/.github/workflows/blender-mesh-bridge.yml
+@@ -0,0 +1,81 @@
++name: Blender Mesh Bridge Windows
++
++on:
++  workflow_dispatch:
++  push:
++    paths:
++      - "stagegen/blender_worker.py"
++      - "stagegen/toolchain.py"
++      - "stagegen/mesh_workspace.py"
++      - "tests/test_mesh_workspace.py"
++      - "tools/geometry/create_blender_bridge_fixture.py"
++      - ".github/workflows/blender-mesh-bridge.yml"
++
++permissions:
++  contents: read
++
++jobs:
++  blender-bridge:
++    runs-on: windows-latest
++    timeout-minutes: 35
++    steps:
++      - uses: actions/checkout@v5
++
++      - uses: actions/setup-python@v6
++        with:
++          python-version: "3.14"
++          architecture: "x64"
++          cache: pip
++
++      - name: Install Open3D and StageGen dependencies
++        run: |
++          python -m pip install --upgrade pip
++          python -m pip install -r requirements.txt pytest
++
++      - name: Run Python geometry tests
++        run: python -m pytest -q tests/test_mesh_workspace.py tests/test_toolchain.py
++
++      - name: Download, verify and install Blender 5.2.5 LTS
++        run: python -m stagegen.cli toolchain install-blender
++
++      - name: Create synthetic road and terrain PLY inputs
++        shell: pwsh
++        run: python tools/geometry/create_blender_bridge_fixture.py --out "$env:RUNNER_TEMP/acr-blender-bridge"
++
++      - name: Process meshes in Blender background mode
++        shell: pwsh
++        run: >-
++          python -m stagegen.cli geometry process-workspace
++          --workspace "$env:RUNNER_TEMP/acr-blender-bridge"
++          --operation recalculate_normals
++
++      - name: Verify processed PLY and native Blender projects
++        shell: pwsh
++        run: |
++          $workspace = Join-Path $env:RUNNER_TEMP "acr-blender-bridge"
++          $processed = Join-Path $workspace "processed"
++          $required = @(
++            "road_collision_processed.ply",
++            "road_collision_processed.blend",
++            "terrain_collision_processed.ply",
++            "terrain_collision_processed.blend"
++          )
++          foreach ($name in $required) {
++            $path = Join-Path $processed $name
++            if (!(Test-Path $path) -or (Get-Item $path).Length -eq 0) {
++              throw "Missing or empty Blender output: $path"
++            }
++          }
++          $report = Join-Path $workspace "blender_processing_report.json"
++          if (!(Test-Path $report) -or (Get-Item $report).Length -eq 0) { throw "Missing Blender processing report: $report" }
++          Write-Host "Blender mesh bridge produced both editable PLY files and native .blend projects."
++
++      - name: Upload Blender bridge outputs
++        uses: actions/upload-artifact@v4
++        with:
++          name: acr-blender-mesh-bridge-test
++          path: |
++            ${{ runner.temp }}/acr-blender-bridge/processed/*
++            ${{ runner.temp }}/acr-blender-bridge/blender_processing_report.json
++          if-no-files-found: error
++          retention-days: 14
+diff --git a/.github/workflows/build-stagegen-windows.yml b/.github/workflows/build-stagegen-windows.yml
+index 4dffb4d..54f0fa4 100644
+--- a/.github/workflows/build-stagegen-windows.yml
++++ b/.github/workflows/build-stagegen-windows.yml
+@@ -32,7 +32,7 @@ jobs:
+           python -m pip install -r requirements-stagegen-build.txt
+ 
+       - name: Run StageGen regression tests
+-        run: python -m pytest -q tests/test_station_and_join_math.py
++        run: python -m pytest -q tests/test_station_and_join_math.py tests/test_mesh_workspace.py tests/test_toolchain.py
+ 
+       - name: Build one-file Windows executable
+         shell: pwsh
+@@ -49,6 +49,7 @@ jobs:
+           --collect-all matplotlib
+           --collect-all open3d
+           --add-data "stagegen/build/empty_mod.pak;stagegen/build"
++          --add-data "stagegen/blender_worker.py;stagegen"
+           stagegen_entry.py
+ 
+       - name: Smoke-test executable
+@@ -59,6 +60,10 @@ jobs:
+         shell: pwsh
+         run: .\dist\acr-stagegen.exe toolchain test-open3d
+ 
++      - name: Geometry workspace CLI smoke test
++        shell: pwsh
++        run: .\dist\acr-stagegen.exe geometry --help
++
+       - name: Add third-party notice
+         shell: pwsh
+         run: Copy-Item LICENSES/Open3D-MIT.txt dist/THIRD-PARTY-NOTICES-Open3D.txt -Force
+diff --git a/.github/workflows/nightly.yml b/.github/workflows/nightly.yml
+index a16661e..3831d60 100644
+--- a/.github/workflows/nightly.yml
++++ b/.github/workflows/nightly.yml
+@@ -44,7 +44,7 @@ jobs:
+ 
+       - name: Python dependencies
+         if: steps.changed.outputs.build == 'true'
+-        run: python -m pip install -r requirements.txt pyinstaller
++        run: python -m pip install -r requirements.txt pyinstaller pytest
+ 
+       - uses: dtolnay/rust-toolchain@stable
+         if: steps.changed.outputs.build == 'true'
+@@ -72,6 +72,14 @@ jobs:
+         if: steps.changed.outputs.build == 'true'
+         run: packaging/dist/stagegen-backend.exe toolchain test-open3d
+ 
++      - name: Geometry workspace regression tests
++        if: steps.changed.outputs.build == 'true'
++        run: python -m pytest -q tests/test_mesh_workspace.py tests/test_toolchain.py
++
++      - name: Geometry CLI smoke test
++        if: steps.changed.outputs.build == 'true'
++        run: packaging/dist/stagegen-backend.exe geometry --help
++
+       - name: GUI (embeds the backend)
+         if: steps.changed.outputs.build == 'true'
+         run: cargo build --release --manifest-path gui/Cargo.toml
+diff --git a/OPEN3D_BLENDER_MESH_WORKSPACE_GUIDE.md b/OPEN3D_BLENDER_MESH_WORKSPACE_GUIDE.md
+new file mode 100644
+index 0000000..b8c80b3
+--- /dev/null
++++ b/OPEN3D_BLENDER_MESH_WORKSPACE_GUIDE.md
+@@ -0,0 +1,102 @@
++# ACR Remixer: Open3D + Blender mesh-workspace integration
++
++## Purpose of this phase
++
++This update integrates Open3D and Blender into the existing `acr-remixer.exe` workflow. It is the tool-integration and mesh-exchange phase, **not** the automatic terrain/road correction phase.
++
++The app can read a selected original stock level through StageGen's existing UE/IoStore reader, export the baked road and terrain collision meshes, analyse them with Open3D, and run controlled Blender background operations on copies. Blender saves both processed PLY files and native `.blend` projects. No Blender window or local Python installation is required.
++
++**Important boundary:** this version exports baked collision geometry, not every visible StaticMesh, Landscape, material, texture, tree, bush, foliage instance, or complete visual scene. It can edit the exported collision-mesh copies, but it does not yet repack those edits into cooked ACR `.uasset/.umap/.ucas/.utoc` packages or install a corrected playable stage. Package reintegration is a later engineering phase.
++
++## Runtime architecture
++
++- **Open3D 0.20.0** is bundled in the frozen Python backend by PyInstaller (`collect_all("open3d")`). It reads/writes mesh interchange files, measures geometry, and performs triangle ray queries.
++- **Blender 5.2.5 LTS** is downloaded on demand from the official Blender release server. Its official SHA-256 manifest is checked before extraction. The EXE launches it in background mode with a bundled, allow-listed Python worker.
++- **Rust/egui GUI** starts backend jobs asynchronously, shows progress/log output, and opens the generated workspace folder.
++- **StageGen** remains the game-specific reader/writer. Blender/Open3D do not parse Unreal IoStore packages directly.
++
++Blender uses the documented `bpy.ops.wm.ply_import`, `bpy.ops.wm.ply_export`, and `bpy.ops.wm.save_as_mainfile` APIs. The worker explicitly keeps scale and axes at 1.0 / Y-forward / Z-up and labels the scene as metric without rescaling coordinates. See the Blender 5.2 API documentation: https://docs.blender.org/api/5.2/bpy.ops.wm.html.
++
++## In-app workflow
++
++1. Select an original stock stage in ACR Remixer.
++2. Open **Setup → 3D geometry tools (Open3D / Blender)**.
++3. Click **Analyze stock stage with Open3D**.
++   - StageGen opens stock PAK/IoStore data with `include_mods=False`.
++   - It exports the baked road/terrain collision classes and route centreline.
++   - Open3D checks mesh integrity, bounds, area and vertical road-to-terrain relationships.
++4. Click **Edit collision mesh copies with Blender**. The EXE runs Blender in background mode; you do not need to open Blender yourself.
++   - If the managed Blender copy is missing, the EXE downloads and verifies it automatically.
++   - Blender imports each copied PLY in background mode.
++   - It runs the selected allow-listed operation, exports a processed PLY, and saves a native `.blend` project.
++5. Click **Open workspace folder** to inspect reports, processed PLY files and the saved `.blend` projects.
++
++The original PAK files and source OBJ/PLY exports are never overwritten. The GUI's current default Blender operation is `recalculate_normals`; `triangulate` is also available through the CLI.
++
++## Workspace output
++
++```text
++out/geometry-workspaces/<Level>/
++  <Level>_collision.json
++  <Level>_collision_meshes.csv
++  <Level>_road_collision.obj
++  <Level>_terrain_collision.obj
++  <Level>_route_centreline.obj
++  exchange/
++    road_collision.ply
++    terrain_collision.ply
++  open3d_stage_analysis.json
++  processed/
++    road_collision_processed.ply
++    road_collision_processed.blend
++    terrain_collision_processed.ply
++    terrain_collision_processed.blend
++    road_collision_processed.ply.blender.json
++    terrain_collision_processed.ply.blender.json
++  blender_processing_report.json
++```
++
++Only classes successfully exported by StageGen are present. A missing road/terrain OBJ is reported; it is not fabricated.
++
++## CLI equivalents
++
++```powershell
++# Read/extract a stock stage and analyse its baked road/terrain collision meshes.
++acr-stagegen.exe geometry analyze-stage --level WalesS4HafrenSouth --paks "C:\...\acr\Content\Paks" --out ".\out\geometry-workspaces\WalesS4HafrenSouth"
++
++# Run Blender headlessly on copied PLY files and save .blend projects.
++acr-stagegen.exe geometry process-workspace --workspace ".\out\geometry-workspaces\WalesS4HafrenSouth" --operation recalculate_normals
++```
++
++## Managed Blender installation
++
++Blender 5.2.5 portable x64 is downloaded only when a Blender mesh job is requested. The EXE stores it under:
++
++```text
++%LOCALAPPDATA%\ACRRemixer\Tools\Blender\5.2.5
++```
++
++The app needs an internet connection for the first download and several GB of free disk space. Later runs reuse the verified installation. `ACR_REMIXER_BLENDER_EXE` can point to an existing compatible Blender 5.2.5 executable for development/testing.
++
++## Safety and limitations
++
++- All edits are performed on copies in `exchange/` and `processed/`; the original game containers are read-only during this workflow.
++- The Blender worker accepts only an allow-list of operations. It does not execute arbitrary scripts passed from the GUI.
++- `recalculate_normals` is expected to preserve geometry; StageGen compares counts, bounds (5 mm tolerance for float coordinates) and surface area before accepting the result.
++- The worker saves a `.blend` project so later correction scripts can run in the same background environment.
++- PLY is an interchange format; it does not preserve Unreal material slots, LODs, StaticMesh build settings, collision metadata, actor transforms, HLOD relationships, Data Layers, or IoStore package identity.
++- Open3D ray checks are geometric queries, not Unreal runtime physics queries. They do not by themselves prove vehicle support in-game.
++- This phase does not automatically repair terrain, modify visible road meshes, move trees/bushes, regenerate collision, change road direction, or install a corrected stage.
++- To make corrected geometry playable, a later schema-aware reintegration layer must associate edited mesh results with their original Unreal asset/actor identities and rebuild the relevant cooked package data without discarding materials, UVs, LODs, collision and World Partition references.
++
++## GitHub and tests
++
++The existing `nightly` workflow builds the frozen Python backend and Rust GUI, then publishes the EXE. It also runs Python tests and the Open3D smoke test.
++
++A separate Windows workflow, `.github/workflows/blender-mesh-bridge.yml`, downloads/verifies Blender 5.2.5 and runs a real background PLY import → processing → PLY export + `.blend` save round trip on deterministic synthetic meshes. It uploads the resulting files as an Actions artifact. This validates the Blender runner without putting ACR game assets in a public workflow.
++
++The standard `acr-stagegen` Windows workflow also runs the geometry workspace tests and CLI smoke test.
++
++## Next phase
++
++After the EXE build and Blender bridge workflow pass on Windows, implement the full stock-stage analysis engine and correction algorithms. The first package-reintegration milestone should preserve mesh identity and metadata and initially target collision-only assets. Visible render StaticMeshes, terrain, foliage and World Partition authoring need separate extraction/serialization work. No corrected PAK should be installed until the rebuilt package passes validation and a test-stage round trip.
+diff --git a/docs/GEOMETRY_WORKSPACE_BLENDER_OPEN3D.md b/docs/GEOMETRY_WORKSPACE_BLENDER_OPEN3D.md
+new file mode 100644
+index 0000000..b8c80b3
+--- /dev/null
++++ b/docs/GEOMETRY_WORKSPACE_BLENDER_OPEN3D.md
+@@ -0,0 +1,102 @@
++# ACR Remixer: Open3D + Blender mesh-workspace integration
++
++## Purpose of this phase
++
++This update integrates Open3D and Blender into the existing `acr-remixer.exe` workflow. It is the tool-integration and mesh-exchange phase, **not** the automatic terrain/road correction phase.
++
++The app can read a selected original stock level through StageGen's existing UE/IoStore reader, export the baked road and terrain collision meshes, analyse them with Open3D, and run controlled Blender background operations on copies. Blender saves both processed PLY files and native `.blend` projects. No Blender window or local Python installation is required.
++
++**Important boundary:** this version exports baked collision geometry, not every visible StaticMesh, Landscape, material, texture, tree, bush, foliage instance, or complete visual scene. It can edit the exported collision-mesh copies, but it does not yet repack those edits into cooked ACR `.uasset/.umap/.ucas/.utoc` packages or install a corrected playable stage. Package reintegration is a later engineering phase.
++
++## Runtime architecture
++
++- **Open3D 0.20.0** is bundled in the frozen Python backend by PyInstaller (`collect_all("open3d")`). It reads/writes mesh interchange files, measures geometry, and performs triangle ray queries.
++- **Blender 5.2.5 LTS** is downloaded on demand from the official Blender release server. Its official SHA-256 manifest is checked before extraction. The EXE launches it in background mode with a bundled, allow-listed Python worker.
++- **Rust/egui GUI** starts backend jobs asynchronously, shows progress/log output, and opens the generated workspace folder.
++- **StageGen** remains the game-specific reader/writer. Blender/Open3D do not parse Unreal IoStore packages directly.
++
++Blender uses the documented `bpy.ops.wm.ply_import`, `bpy.ops.wm.ply_export`, and `bpy.ops.wm.save_as_mainfile` APIs. The worker explicitly keeps scale and axes at 1.0 / Y-forward / Z-up and labels the scene as metric without rescaling coordinates. See the Blender 5.2 API documentation: https://docs.blender.org/api/5.2/bpy.ops.wm.html.
++
++## In-app workflow
++
++1. Select an original stock stage in ACR Remixer.
++2. Open **Setup → 3D geometry tools (Open3D / Blender)**.
++3. Click **Analyze stock stage with Open3D**.
++   - StageGen opens stock PAK/IoStore data with `include_mods=False`.
++   - It exports the baked road/terrain collision classes and route centreline.
++   - Open3D checks mesh integrity, bounds, area and vertical road-to-terrain relationships.
++4. Click **Edit collision mesh copies with Blender**. The EXE runs Blender in background mode; you do not need to open Blender yourself.
++   - If the managed Blender copy is missing, the EXE downloads and verifies it automatically.
++   - Blender imports each copied PLY in background mode.
++   - It runs the selected allow-listed operation, exports a processed PLY, and saves a native `.blend` project.
++5. Click **Open workspace folder** to inspect reports, processed PLY files and the saved `.blend` projects.
++
++The original PAK files and source OBJ/PLY exports are never overwritten. The GUI's current default Blender operation is `recalculate_normals`; `triangulate` is also available through the CLI.
++
++## Workspace output
++
++```text
++out/geometry-workspaces/<Level>/
++  <Level>_collision.json
++  <Level>_collision_meshes.csv
++  <Level>_road_collision.obj
++  <Level>_terrain_collision.obj
++  <Level>_route_centreline.obj
++  exchange/
++    road_collision.ply
++    terrain_collision.ply
++  open3d_stage_analysis.json
++  processed/
++    road_collision_processed.ply
++    road_collision_processed.blend
++    terrain_collision_processed.ply
++    terrain_collision_processed.blend
++    road_collision_processed.ply.blender.json
++    terrain_collision_processed.ply.blender.json
++  blender_processing_report.json
++```
++
++Only classes successfully exported by StageGen are present. A missing road/terrain OBJ is reported; it is not fabricated.
++
++## CLI equivalents
++
++```powershell
++# Read/extract a stock stage and analyse its baked road/terrain collision meshes.
++acr-stagegen.exe geometry analyze-stage --level WalesS4HafrenSouth --paks "C:\...\acr\Content\Paks" --out ".\out\geometry-workspaces\WalesS4HafrenSouth"
++
++# Run Blender headlessly on copied PLY files and save .blend projects.
++acr-stagegen.exe geometry process-workspace --workspace ".\out\geometry-workspaces\WalesS4HafrenSouth" --operation recalculate_normals
++```
++
++## Managed Blender installation
++
++Blender 5.2.5 portable x64 is downloaded only when a Blender mesh job is requested. The EXE stores it under:
++
++```text
++%LOCALAPPDATA%\ACRRemixer\Tools\Blender\5.2.5
++```
++
++The app needs an internet connection for the first download and several GB of free disk space. Later runs reuse the verified installation. `ACR_REMIXER_BLENDER_EXE` can point to an existing compatible Blender 5.2.5 executable for development/testing.
++
++## Safety and limitations
++
++- All edits are performed on copies in `exchange/` and `processed/`; the original game containers are read-only during this workflow.
++- The Blender worker accepts only an allow-list of operations. It does not execute arbitrary scripts passed from the GUI.
++- `recalculate_normals` is expected to preserve geometry; StageGen compares counts, bounds (5 mm tolerance for float coordinates) and surface area before accepting the result.
++- The worker saves a `.blend` project so later correction scripts can run in the same background environment.
++- PLY is an interchange format; it does not preserve Unreal material slots, LODs, StaticMesh build settings, collision metadata, actor transforms, HLOD relationships, Data Layers, or IoStore package identity.
++- Open3D ray checks are geometric queries, not Unreal runtime physics queries. They do not by themselves prove vehicle support in-game.
++- This phase does not automatically repair terrain, modify visible road meshes, move trees/bushes, regenerate collision, change road direction, or install a corrected stage.
++- To make corrected geometry playable, a later schema-aware reintegration layer must associate edited mesh results with their original Unreal asset/actor identities and rebuild the relevant cooked package data without discarding materials, UVs, LODs, collision and World Partition references.
++
++## GitHub and tests
++
++The existing `nightly` workflow builds the frozen Python backend and Rust GUI, then publishes the EXE. It also runs Python tests and the Open3D smoke test.
++
++A separate Windows workflow, `.github/workflows/blender-mesh-bridge.yml`, downloads/verifies Blender 5.2.5 and runs a real background PLY import → processing → PLY export + `.blend` save round trip on deterministic synthetic meshes. It uploads the resulting files as an Actions artifact. This validates the Blender runner without putting ACR game assets in a public workflow.
++
++The standard `acr-stagegen` Windows workflow also runs the geometry workspace tests and CLI smoke test.
++
++## Next phase
++
++After the EXE build and Blender bridge workflow pass on Windows, implement the full stock-stage analysis engine and correction algorithms. The first package-reintegration milestone should preserve mesh identity and metadata and initially target collision-only assets. Visible render StaticMeshes, terrain, foliage and World Partition authoring need separate extraction/serialization work. No corrected PAK should be installed until the rebuilt package passes validation and a test-stage round trip.
+diff --git a/docs/OPEN3D_BLENDER_RUNTIME.md b/docs/OPEN3D_BLENDER_RUNTIME.md
+index 291cea3..5f0b66c 100644
+--- a/docs/OPEN3D_BLENDER_RUNTIME.md
++++ b/docs/OPEN3D_BLENDER_RUNTIME.md
+@@ -2,7 +2,7 @@
+ 
+ ## Scope of this phase
+ 
+-This change integrates geometry tools into the existing ACR Remixer distribution. It does **not** implement terrain, road, collision, or foliage correction. Existing stage generation remains unchanged.
++This integration makes the EXE able to extract a selected stock level's baked road/terrain collision meshes, analyse them with Open3D, and run a controlled Blender background mesh pass on copied PLY files. It does **not** implement automatic terrain/road/foliage correction, and it does **not** repack Blender-edited PLY files into cooked Unreal packages. Existing stage generation remains unchanged.
+ 
+ ## Open3D: bundled into the application
+ 
+@@ -63,7 +63,7 @@ For development, use the equivalent StageGen backend command (for example `pytho
+ 
+ - Unit tests cover checksum-manifest parsing, ZIP path traversal rejection, and safe extraction.
+ - Windows build workflows test the frozen executable by invoking `toolchain test-open3d`.
+-- Blender is downloaded at runtime; it is not part of the release payload. The app reports and logs download/install errors.
++- Blender is downloaded at runtime; it is not part of the release payload. The EXE launches the bundled worker in background mode. The worker imports copied PLY meshes, performs an allow-listed mesh operation, exports a processed PLY, and saves a native `.blend` project. The app reports and logs download/install errors.
+ - This Linux working environment cannot execute the Windows frozen binary or compile the Rust GUI. The first GitHub Windows workflow run is the authoritative packaging and GUI-build check.
+ - No game assets or generated stages are modified by any of these tool-management commands.
+ 
+@@ -73,4 +73,9 @@ Open3D is MIT-licensed. Its copyright and permission notice is included in `LICE
+ 
+ ## Next phase (not included here)
+ 
+-Once both tools are verified in the shipped Windows executable, a separate geometry-engine phase can implement read-only stock-stage classification/analysis and then correction. This integration alone does not inspect or modify roads, terrain, collision, trees, bushes, or other ACR assets.
++The next implementation phase should export visible road/terrain StaticMeshes and foliage instances, classify the full source stage, then develop bounded terrain/vegetation correction. After that, a schema-aware Unreal package reintegration layer is needed before corrected PLY data can become an installable ACR stage.
++
++
++## Mesh workspace bridge
++
++The selected stock-stage analysis exports baked road/terrain collision meshes only. The Blender worker produces `*_processed.ply`, `*_processed.blend`, and a JSON report for each available mesh class. These are editable intermediate assets; they are not repacked or installed as ACR stages by this phase. See `OPEN3D_BLENDER_MESH_WORKSPACE_GUIDE.md` for the end-to-end workflow and exact limitations.
+diff --git a/gui/src/main.rs b/gui/src/main.rs
+index 493376b..52ed59b 100644
+--- a/gui/src/main.rs
++++ b/gui/src/main.rs
+@@ -695,6 +695,7 @@ enum JobKind {
+     ListPieces,
+     Uninstall,
+     Toolchain,
++    Geometry,
+ }
+ 
+ struct Job {
+@@ -938,6 +939,49 @@ impl App {
+         }
+     }
+ 
++    /// Run the stock-stage geometry extraction/analysis or Blender mesh-copy pass.
++    fn run_geometry_action(&mut self, action: &str) {
++        if self.job.is_some() { return; }
++        self.log.clear();
++        self.log.push_str(&format!("=== stock geometry: {action} / {} ===\n", self.prefs.stage));
++        self.tab = Tab::Log;
++        self.job_prefs = None;
++        let p = self.prefs.clone();
++        let workspace = PathBuf::from(&p.out_dir).join("geometry-workspaces").join(&p.stage);
++        match backend_cmd(&p) {
++            Ok((prog, mut full, cwd)) => {
++                full.extend(["geometry".to_string()]);
++                if action == "analyze-stage" {
++                    let paks = PathBuf::from(&p.acr_dir).join(r"acr\Content\Paks").display().to_string();
++                    full.extend(["analyze-stage".into(), "--level".into(), p.stage.clone(),
++                                 "--paks".into(), paks, "--out".into(), workspace.display().to_string()]);
++                } else {
++                    full.extend(["process-workspace".into(), "--workspace".into(), workspace.display().to_string(),
++                                 "--operation".into(), "recalculate_normals".into()]);
++                }
++                let (tx, rx) = channel();
++                self.job = Some(Job { rx, remaining: vec![], total: 1, progress: 0.0,
++                                      phase: action.into(), kind: JobKind::Geometry });
++                spawn_build(prog, cwd, full, None, tx);
++            }
++            Err(e) => self.log.push_str(&format!("backend: {e}\n")),
++        }
++    }
++
++    fn open_geometry_workspace(&mut self) {
++        let path = PathBuf::from(&self.prefs.out_dir).join("geometry-workspaces").join(&self.prefs.stage);
++        if !path.is_dir() {
++            self.log.push_str(&format!("geometry workspace does not exist yet: {}\n", path.display()));
++            return;
++        }
++        #[cfg(target_os = "windows")]
++        {
++            if let Err(e) = Command::new("explorer").arg(&path).spawn() {
++                self.log.push_str(&format!("could not open geometry workspace: {e}\n"));
++            }
++        }
++    }
++
+     /// Load the untouched source stage's route, tile cuts and candidate pieces.
+     fn list_segments(&mut self) {
+         let p = self.prefs.clone();
+@@ -1096,6 +1140,14 @@ impl App {
+                         self.log.push_str("3D toolchain action failed (see above).\n");
+                     }
+                 }
++                JobKind::Geometry => {
++                    self.job = None;
++                    if !ok {
++                        self.log.push_str("stock geometry operation failed (see above).\n");
++                    } else {
++                        self.log.push_str("geometry workspace operation finished; source game packages were not modified.\n");
++                    }
++                }
+             }
+         }
+     }
+@@ -1243,6 +1295,8 @@ impl eframe::App for App {
+         let mut block_changed = false;
+         let mut want_segments = false;
+         let mut want_tool_action: Option<&'static str> = None;
++        let mut want_geometry_action: Option<&'static str> = None;
++        let mut open_geometry_workspace = false;
+         let mut want_add_piece = false;
+         let mut inst_action: Option<InstAction> = None;
+         let pv_seq = self.preview.as_ref().map(|pv| pv.sequence.clone()).filter(|s| !s.is_empty());
+@@ -1357,21 +1411,30 @@ impl eframe::App for App {
+                         .on_hover_text("TEST ONLY: removes box/sphere/capsule entries from baked collision while retaining triangle meshes. Some props may lose collision.");
+                 });
+                 egui::CollapsingHeader::new("3D geometry tools (Open3D / Blender)").show(ui, |ui| {
+-                    ui.label("Open3D is bundled inside ACR Remixer and checked by the backend.");
+-                    ui.label("Blender is downloaded on request (~406 MB) and cached under LocalAppData.");
++                    ui.label("Open3D is bundled in the backend. Blender is downloaded on demand and runs headlessly; no Blender window is needed.");
+                     ui.add(egui::Label::new(egui::RichText::new(&self.tool_status).small()).wrap());
+                     ui.horizontal_wrapped(|ui| {
+                         if ui.add_enabled(!busy, egui::Button::new("Check tools")).clicked() {
+                             want_tool_action = Some("status");
+                         }
+-                        if ui.add_enabled(!busy, egui::Button::new("Download / repair Blender")).clicked() {
++                        if ui.add_enabled(!busy, egui::Button::new("Install / repair Blender")).clicked() {
+                             want_tool_action = Some("install-blender");
+                         }
+-                        if ui.add_enabled(!busy, egui::Button::new("Test Blender")).clicked() {
+-                            want_tool_action = Some("test-blender");
++                    });
++                    ui.separator();
++                    ui.label("Selected stock stage geometry workspace:");
++                    ui.horizontal_wrapped(|ui| {
++                        if ui.add_enabled(!busy, egui::Button::new("Analyze stock stage with Open3D")).clicked() {
++                            want_geometry_action = Some("analyze-stage");
++                        }
++                        if ui.add_enabled(!busy, egui::Button::new("Edit collision mesh copies with Blender")).clicked() {
++                            want_geometry_action = Some("process-workspace");
++                        }
++                        if ui.add_enabled(!busy, egui::Button::new("Open workspace folder")).clicked() {
++                            open_geometry_workspace = true;
+                         }
+                     });
+-                    ui.small("This setup only verifies the tools. It does not modify stock stages or geometry.");
++                    ui.small("Exports the selected stock stage's baked road/terrain collision meshes. Open3D analyses them; Blender edits copied PLY meshes in background mode and saves processed PLY + native .blend project files. Original PAK files are never overwritten. Edited meshes are not yet repacked into cooked Unreal assets.");
+                 });
+                 ui.checkbox(&mut p.install, "Install into the game (closes ACR)");
+                 ui.add_enabled(p.install, egui::Checkbox::new(&mut p.launch, "Start ACR afterwards"));
+@@ -1522,6 +1585,12 @@ impl eframe::App for App {
+         if let Some(action) = want_tool_action.filter(|_| !busy) {
+             self.run_toolchain(action);
+         }
++        if let Some(action) = want_geometry_action.filter(|_| !busy) {
++            self.run_geometry_action(action);
++        }
++        if open_geometry_workspace && !busy {
++            self.open_geometry_workspace();
++        }
+         match inst_action {
+             Some(InstAction::Show(i)) => self.show_installed(&i),
+             Some(InstAction::Load(i)) => {
+diff --git a/packaging/backend.spec b/packaging/backend.spec
+index 5e80b14..3c4b902 100644
+--- a/packaging/backend.spec
++++ b/packaging/backend.spec
+@@ -18,6 +18,7 @@ a = Analysis(
+     binaries=[(os.path.join(ROOT, "oodle_shim", "target", "release", "oo2core_shim.dll"), ".")] + o3d_binaries,
+     datas=[
+         (os.path.join(ROOT, "stagegen", "build", "empty_mod.pak"), os.path.join("stagegen", "build")),
++        (os.path.join(ROOT, "stagegen", "blender_worker.py"), os.path.join("stagegen")),
+         (os.path.join(ROOT, "LICENSES", "Open3D-MIT.txt"), os.path.join("licenses")),
+     ] + o3d_datas,
+     hiddenimports=["scipy.spatial._ckdtree", "scipy.interpolate", "scipy.ndimage"] + o3d_hiddenimports,
+diff --git a/stagegen/blender_worker.py b/stagegen/blender_worker.py
+new file mode 100644
+index 0000000..2967f6d
+--- /dev/null
++++ b/stagegen/blender_worker.py
+@@ -0,0 +1,130 @@
++# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
++# SPDX-License-Identifier: MIT
++
++"""Controlled Blender background worker for ACR Remixer mesh workspaces.
++
++Invoked only by stagegen.toolchain.blender_process_mesh. It deliberately accepts
++an allow-listed operation rather than executing caller-supplied Python code.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++import traceback
++from pathlib import Path
++
++
++def _args() -> argparse.Namespace:
++    if "--" not in sys.argv:
++        raise RuntimeError("Blender worker arguments must follow '--'")
++    parser = argparse.ArgumentParser(prog="acr-remixer-blender-worker")
++    parser.add_argument("--input", required=True)
++    parser.add_argument("--output", required=True)
++    parser.add_argument("--report", required=True)
++    parser.add_argument("--blend-output", required=True, help="native Blender project saved after processing")
++    parser.add_argument("--operation", choices=("recalculate_normals", "triangulate"), default="recalculate_normals")
++    return parser.parse_args(sys.argv[sys.argv.index("--") + 1:])
++
++
++def _mesh_objects():
++    import bpy
++    return [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
++
++
++def _apply_operation(objects, operation: str) -> dict:
++    import bmesh
++    counts = {"objects": len(objects), "vertices_before": 0, "vertices_after": 0,
++              "faces_before": 0, "faces_after": 0}
++    for obj in objects:
++        mesh = obj.data
++        counts["vertices_before"] += len(mesh.vertices)
++        counts["faces_before"] += len(mesh.polygons)
++        bm = bmesh.new()
++        try:
++            bm.from_mesh(mesh)
++            if operation == "recalculate_normals":
++                bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
++            elif operation == "triangulate":
++                bmesh.ops.triangulate(bm, faces=list(bm.faces))
++            bm.to_mesh(mesh)
++            mesh.update()
++        finally:
++            bm.free()
++        counts["vertices_after"] += len(mesh.vertices)
++        counts["faces_after"] += len(mesh.polygons)
++    return counts
++
++
++def main() -> int:
++    args = _args()
++    input_path = Path(args.input).resolve()
++    output_path = Path(args.output).resolve()
++    report_path = Path(args.report).resolve()
++    blend_output_path = Path(args.blend_output).resolve()
++    if not input_path.is_file():
++        raise FileNotFoundError(f"Input PLY does not exist: {input_path}")
++    if input_path.suffix.lower() != ".ply" or output_path.suffix.lower() != ".ply":
++        raise ValueError("Blender bridge accepts PLY input and output to keep the exchange coordinate convention explicit")
++    if input_path == output_path:
++        raise ValueError("Input and output paths must be different; source mesh is never overwritten")
++    if blend_output_path in (input_path, output_path, report_path):
++        raise ValueError("Blender project path must be separate from input, mesh output and report")
++
++    import bpy
++    bpy.ops.wm.read_factory_settings(use_empty=True)
++    bpy.ops.wm.ply_import(
++        filepath=str(input_path), global_scale=1.0, use_scene_unit=False,
++        forward_axis="Y", up_axis="Z", merge_verts=False,
++    )
++    objects = _mesh_objects()
++    if not objects:
++        raise RuntimeError("Blender imported no mesh objects from the PLY file")
++    # Give the project useful defaults for downstream mesh work. The PLY exchange
++    # coordinates are preserved; scene units are labelled metric without scaling.
++    bpy.context.scene.unit_settings.system = "METRIC"
++    bpy.context.scene.unit_settings.scale_length = 1.0
++    for index, obj in enumerate(objects, start=1):
++        obj.name = f"{input_path.stem}_{index:02d}"
++        obj.data.name = f"{input_path.stem}_{index:02d}_Mesh"
++    counts = _apply_operation(objects, args.operation)
++    output_path.parent.mkdir(parents=True, exist_ok=True)
++    result = bpy.ops.wm.ply_export(
++        filepath=str(output_path), global_scale=1.0, use_scene_unit=False,
++        forward_axis="Y", up_axis="Z", export_selected_objects=False,
++        export_normals=True, export_triangulated_mesh=False, ascii_format=False,
++    )
++    if "FINISHED" not in result or not output_path.is_file() or output_path.stat().st_size == 0:
++        raise RuntimeError(f"Blender PLY export did not finish: {result}")
++
++    blend_output_path.parent.mkdir(parents=True, exist_ok=True)
++    save_result = bpy.ops.wm.save_as_mainfile(
++        filepath=str(blend_output_path), check_existing=False, compress=True
++    )
++    if "FINISHED" not in save_result or not blend_output_path.is_file() or blend_output_path.stat().st_size == 0:
++        raise RuntimeError(f"Blender project save did not finish: {save_result}")
++
++    report = {
++        "success": True,
++        "blender_version": bpy.app.version_string,
++        "operation": args.operation,
++        "input": str(input_path),
++        "output": str(output_path),
++        "blend_project": str(blend_output_path),
++        "counts": counts,
++        "coordinate_space": "PLY world coordinates; no explicit unit or axis conversion applied by worker",
++        "scene_units": "METRIC with scale_length=1.0; coordinate values are not rescaled",
++    }
++    report_path.parent.mkdir(parents=True, exist_ok=True)
++    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
++    print("ACR_REMIXER_BLENDER_JOB=" + json.dumps(report, separators=(",", ":")), flush=True)
++    return 0
++
++
++if __name__ == "__main__":
++    try:
++        raise SystemExit(main())
++    except Exception as exc:
++        print(f"ACR Remixer Blender worker failed: {type(exc).__name__}: {exc}", file=sys.stderr)
++        traceback.print_exc()
++        raise SystemExit(2)
+diff --git a/stagegen/cli.py b/stagegen/cli.py
+index 72b3326..66a6a39 100644
+--- a/stagegen/cli.py
++++ b/stagegen/cli.py
+@@ -413,6 +413,29 @@ def _uninstall(a, quiet: bool = False) -> int:
+     return _refresh_tables(a) if want else 0
+ 
+ 
++
++def _geometry_command(a) -> int:
++    """Extract stock collision geometry, analyse it, or process exported copies."""
++    try:
++        if a.geometry_action == "analyze-stage":
++            from .extract.real import DEFAULT_PAKS
++            from .mesh_workspace import analyse_stage
++            paks = os.path.normpath(a.paks or DEFAULT_PAKS)
++            report = analyse_stage(a.level, paks, a.out, a.corridor, a.samples)
++            road = report["open3d_mesh_statistics"].get("road", {}).get("triangles", 0)
++            terrain = report["open3d_mesh_statistics"].get("terrain", {}).get("triangles", 0)
++            print(f"stock geometry analysis complete: {a.level}; road triangles={road}, terrain triangles={terrain}")
++            return 0
++        if a.geometry_action == "process-workspace":
++            from .mesh_workspace import process_workspace_with_blender
++            report = process_workspace_with_blender(a.workspace, operation=a.operation)
++            print(f"Blender processed {len(report['processed_meshes'])} mesh export(s)")
++            return 0
++    except Exception as exc:
++        print(f"geometry operation failed: {type(exc).__name__}: {exc}")
++        return 1
++    return 2
++
+ def _toolchain_command(a) -> int:
+     """Check or provision optional 3D tools used by the analysis engine."""
+     from . import toolchain
+@@ -450,6 +473,18 @@ def _toolchain_command(a) -> int:
+ def main(argv=None):
+     ap = argparse.ArgumentParser(prog="acr-stagegen")
+     sub = ap.add_subparsers(dest="cmd", required=True)
++    geo = sub.add_parser("geometry", help="analyse stock-stage meshes and process editable mesh workspaces")
++    geo_sub = geo.add_subparsers(dest="geometry_action", required=True)
++    ga = geo_sub.add_parser("analyze-stage", help="extract and analyse a stock stage's baked road/terrain collision meshes")
++    ga.add_argument("--level", required=True, help="stock stage level, e.g. WalesS4HafrenSouth")
++    ga.add_argument("--paks", help="path to acr/Content/Paks")
++    ga.add_argument("--out", required=True, help="geometry workspace directory")
++    ga.add_argument("--corridor", type=float, default=30.0)
++    ga.add_argument("--samples", type=int, default=20_000, help="Open3D road surface ray samples (100..100000)")
++    gp = geo_sub.add_parser("process-workspace", help="run Blender on copied PLY mesh exports in a geometry workspace")
++    gp.add_argument("--workspace", required=True)
++    gp.add_argument("--operation", choices=("recalculate_normals", "triangulate"), default="recalculate_normals")
++
+     tc = sub.add_parser("toolchain", help="check or install integrated 3D geometry tools")
+     tc.add_argument("action", choices=("status", "test-open3d", "install-blender", "test-blender"))
+     tc.add_argument("--force", action="store_true", help="reinstall the managed Blender version")
+@@ -517,6 +552,8 @@ def main(argv=None):
+     a = ap.parse_args(argv)
+     if a.cmd == "toolchain":
+         return _toolchain_command(a)
++    if a.cmd == "geometry":
++        return _geometry_command(a)
+     if a.cmd == "install":
+         return _install(a)
+     if a.cmd == "uninstall":
+diff --git a/stagegen/mesh_workspace.py b/stagegen/mesh_workspace.py
+new file mode 100644
+index 0000000..2fe43c5
+--- /dev/null
++++ b/stagegen/mesh_workspace.py
+@@ -0,0 +1,388 @@
++# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
++# SPDX-License-Identifier: MIT
++
++"""Create and process an editable mesh workspace from an ACR stock stage.
++
++This module deliberately works on exported collision meshes (OBJ/PLY). It does
++not claim to import or rewrite Unreal .uasset/.umap/IoStore packages from Blender.
++The StageGen package reader performs the game-specific extraction; Open3D and
++Blender operate on the neutral mesh files produced by that extraction.
++"""
++from __future__ import annotations
++
++import json
++import math
++import os
++from pathlib import Path
++from typing import Any
++
++import numpy as np
++
++from . import toolchain
++
++
++class GeometryWorkspaceError(RuntimeError):
++    """A stock-stage mesh workspace could not be created or processed."""
++
++
++def _open3d():
++    try:
++        import open3d as o3d
++    except Exception as exc:  # pragma: no cover - depends on the frozen runtime
++        raise GeometryWorkspaceError(
++            f"Open3D is not available in this backend: {type(exc).__name__}: {exc}"
++        ) from exc
++    return o3d
++
++
++def _finite_mesh(mesh, label: str) -> tuple[np.ndarray, np.ndarray]:
++    vertices = np.asarray(mesh.vertices, dtype=np.float64)
++    triangles = np.asarray(mesh.triangles, dtype=np.int64)
++    if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) == 0:
++        raise GeometryWorkspaceError(f"{label}: mesh has no valid vertices")
++    if triangles.ndim != 2 or triangles.shape[1] != 3 or len(triangles) == 0:
++        raise GeometryWorkspaceError(f"{label}: mesh has no triangles")
++    if not np.isfinite(vertices).all():
++        raise GeometryWorkspaceError(f"{label}: mesh contains NaN or infinite vertex coordinates")
++    if triangles.min() < 0 or triangles.max() >= len(vertices):
++        raise GeometryWorkspaceError(f"{label}: mesh contains out-of-range triangle indices")
++    return vertices, triangles
++
++
++def _mesh_stats(mesh, label: str) -> dict[str, Any]:
++    vertices, triangles = _finite_mesh(mesh, label)
++    tri = vertices[triangles]
++    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
++    twice_area = np.linalg.norm(cross, axis=1)
++    degenerate = twice_area <= 1e-10
++    nz_fraction = np.abs(cross[:, 2]) / np.maximum(twice_area, 1e-15)
++    try:
++        area = float(mesh.get_surface_area())
++    except Exception:
++        area = float(np.sum(twice_area) * 0.5)
++    bounds_min = vertices.min(axis=0)
++    bounds_max = vertices.max(axis=0)
++    return {
++        "vertices": int(len(vertices)),
++        "triangles": int(len(triangles)),
++        "degenerate_triangles": int(np.count_nonzero(degenerate)),
++        "surface_area_m2": area,
++        "bounds_min_xyz_m": bounds_min.tolist(),
++        "bounds_max_xyz_m": bounds_max.tolist(),
++        "bounds_size_xyz_m": (bounds_max - bounds_min).tolist(),
++        "upward_or_downward_facing_fraction_abs_nz_ge_0_3": float(np.mean(nz_fraction >= 0.3)),
++        "coordinate_units": "metres (StageGen world coordinates)",
++    }
++
++
++def _read_open3d_mesh(path: Path, label: str):
++    o3d = _open3d()
++    if not path.is_file():
++        raise GeometryWorkspaceError(f"{label}: file does not exist: {path}")
++    try:
++        mesh = o3d.io.read_triangle_mesh(str(path), enable_post_processing=False)
++    except Exception as exc:
++        raise GeometryWorkspaceError(f"{label}: Open3D could not read {path.name}: {exc}") from exc
++    _finite_mesh(mesh, label)
++    return mesh
++
++
++def _write_ply(mesh, path: Path, label: str) -> None:
++    o3d = _open3d()
++    path.parent.mkdir(parents=True, exist_ok=True)
++    try:
++        mesh.compute_vertex_normals()
++        ok = o3d.io.write_triangle_mesh(
++            str(path), mesh, write_ascii=False, compressed=False,
++            write_vertex_normals=True, write_vertex_colors=True,
++            write_triangle_uvs=False, print_progress=False,
++        )
++    except Exception as exc:
++        raise GeometryWorkspaceError(f"{label}: could not write PLY {path}: {exc}") from exc
++    if not ok or not path.is_file() or path.stat().st_size == 0:
++        raise GeometryWorkspaceError(f"{label}: Open3D failed to write {path}")
++
++
++def _raycast_road_to_terrain(road_mesh, terrain_mesh, sample_count: int,
++                             max_down_distance_m: float = 100.0,
++                             max_up_distance_m: float = 100.0,
++                             epsilon_m: float = 0.02) -> dict[str, Any]:
++    """Sample upward-facing road triangles and cast separate up/down terrain rays.
++
++    The downward ray starts just below the sampled road face. This prevents an
++    elevated terrain/bridge surface above the road from being misidentified as
++    the supporting ground. An upward ray separately reports overhead surfaces.
++    It is still a geometric mesh diagnostic, not Unreal's runtime physics query.
++    """
++    o3d = _open3d()
++    road_vertices, road_triangles = _finite_mesh(road_mesh, "road collision")
++    terrain_vertices, terrain_triangles = _finite_mesh(terrain_mesh, "terrain collision")
++
++    tri_xyz = road_vertices[road_triangles]
++    cross = np.cross(tri_xyz[:, 1] - tri_xyz[:, 0], tri_xyz[:, 2] - tri_xyz[:, 0])
++    norm = np.linalg.norm(cross, axis=1)
++    # Winding in cooked collision may vary, so use |normal.z|. Side walls and
++    # near-vertical faces are excluded; banked road decks remain eligible.
++    upwardish = (norm > 1e-12) & (np.abs(cross[:, 2]) / np.maximum(norm, 1e-15) >= 0.30)
++    road_surface = o3d.geometry.TriangleMesh()
++    road_surface.vertices = o3d.utility.Vector3dVector(road_vertices)
++    road_surface.triangles = o3d.utility.Vector3iVector(road_triangles[upwardish].astype(np.int32))
++    if len(road_surface.triangles) == 0:
++        raise GeometryWorkspaceError("road collision has no non-degenerate, upward-facing triangles to sample")
++
++    # Open3D's sampling is area-weighted. Use a fixed seed for reproducible
++    # reports. The count is clamped to protect the GUI from pathological jobs.
++    sample_count = max(100, min(int(sample_count), 100_000))
++    try:
++        points_cloud = road_surface.sample_points_uniformly(
++            number_of_points=sample_count, use_triangle_normal=True, seed=17
++        )
++    except TypeError:
++        # Compatibility fallback for Open3D builds that predate the seed arg.
++        points_cloud = road_surface.sample_points_uniformly(
++            number_of_points=sample_count, use_triangle_normal=True
++        )
++    points = np.asarray(points_cloud.points, dtype=np.float64)
++    if len(points) == 0:
++        raise GeometryWorkspaceError("Open3D did not produce road surface samples")
++
++    terrain_for_raycast = o3d.t.geometry.TriangleMesh.from_legacy(terrain_mesh)
++    scene = o3d.t.geometry.RaycastingScene()
++    scene.add_triangles(terrain_for_raycast)
++
++    down_origins = points.copy()
++    down_origins[:, 2] -= epsilon_m
++    down_rays = np.column_stack((down_origins, np.tile([0.0, 0.0, -1.0], (len(points), 1))))
++    up_origins = points.copy()
++    up_origins[:, 2] += epsilon_m
++    up_rays = np.column_stack((up_origins, np.tile([0.0, 0.0, 1.0], (len(points), 1))))
++
++    down_hit = scene.cast_rays(o3d.core.Tensor(down_rays.astype(np.float32)))
++    up_hit = scene.cast_rays(o3d.core.Tensor(up_rays.astype(np.float32)))
++    down_t = down_hit["t_hit"].numpy().astype(np.float64)
++    up_t = up_hit["t_hit"].numpy().astype(np.float64)
++
++    down_found = np.isfinite(down_t) & (down_t <= max_down_distance_m)
++    up_found = np.isfinite(up_t) & (up_t <= max_up_distance_m)
++    down_gap = epsilon_m + down_t[down_found]
++    overhead_clearance = epsilon_m + up_t[up_found]
++
++    def distribution(values: np.ndarray) -> dict[str, float | None]:
++        if len(values) == 0:
++            return {"min": None, "p50": None, "p95": None, "max": None}
++        return {
++            "min": float(np.min(values)),
++            "p50": float(np.percentile(values, 50)),
++            "p95": float(np.percentile(values, 95)),
++            "max": float(np.max(values)),
++        }
++
++    return {
++        "method": "Open3D RaycastingScene; area-weighted road samples; separate vertical rays",
++        "sample_count": int(len(points)),
++        "road_surface_triangle_count": int(len(road_surface.triangles)),
++        "road_source_triangle_count": int(len(road_triangles)),
++        "downward_ground_hits": int(np.count_nonzero(down_found)),
++        "downward_ground_coverage_fraction": float(np.mean(down_found)),
++        "downward_ground_gap_m": distribution(down_gap),
++        "ground_within_1m_fraction": float(np.mean(down_found & (down_t + epsilon_m <= 1.0))),
++        "ground_within_3m_fraction": float(np.mean(down_found & (down_t + epsilon_m <= 3.0))),
++        "ground_within_6m_fraction": float(np.mean(down_found & (down_t + epsilon_m <= 6.0))),
++        "no_ground_within_search_distance_count": int(np.count_nonzero(~down_found)),
++        "upward_surface_hits": int(np.count_nonzero(up_found)),
++        "upward_surface_clearance_m": distribution(overhead_clearance),
++        "overhead_surface_within_1m_count": int(np.count_nonzero(up_found & (up_t + epsilon_m <= 1.0))),
++        "max_down_search_m": float(max_down_distance_m),
++        "max_up_search_m": float(max_up_distance_m),
++        "warning": "Geometric mesh comparison only; not an Unreal runtime physics/collision query.",
++    }
++
++
++def analyse_stage(level: str, paks: str, out_dir: str, corridor_m: float = 30.0,
++                  sample_count: int = 20_000) -> dict[str, Any]:
++    """Extract a stock stage's baked collision mesh exports and analyse with Open3D."""
++    from .extract.iostore import GameFS
++    from .inspect_collision import inspect_one
++
++    out = Path(out_dir).expanduser().resolve()
++    out.mkdir(parents=True, exist_ok=True)
++    print("@progress 0.03 Opening stock stage packages", flush=True)
++    fs = GameFS(os.path.normpath(paks), include_mods=False)
++    print("@progress 0.12 Extracting the stock road/terrain collision meshes", flush=True)
++    source_report = inspect_one(fs, level, str(out), corridor_m=corridor_m, write_obj=True)
++
++    stem = re_safe(level)
++    road_obj = out / f"{stem}_road_collision.obj"
++    terrain_obj = out / f"{stem}_terrain_collision.obj"
++    exchange = out / "exchange"
++    source_meshes: dict[str, Path] = {}
++    stats: dict[str, Any] = {}
++
++    for label, source in (("road", road_obj), ("terrain", terrain_obj)):
++        if not source.is_file():
++            stats[label] = {"available": False, "reason": "No collision OBJ was exported for this class."}
++            continue
++        print(f"@progress 0.20 Reading {label} collision mesh with Open3D", flush=True)
++        mesh = _read_open3d_mesh(source, f"{label} collision")
++        stats[label] = {"available": True, **_mesh_stats(mesh, f"{label} collision")}
++        ply = exchange / f"{label}_collision.ply"
++        _write_ply(mesh, ply, f"{label} collision")
++        source_meshes[label] = ply
++
++    road_terrain: dict[str, Any]
++    if "road" in source_meshes and "terrain" in source_meshes:
++        print("@progress 0.42 Running Open3D road-to-ground ray analysis", flush=True)
++        road_mesh = _read_open3d_mesh(source_meshes["road"], "road collision PLY")
++        terrain_mesh = _read_open3d_mesh(source_meshes["terrain"], "terrain collision PLY")
++        road_terrain = _raycast_road_to_terrain(road_mesh, terrain_mesh, sample_count)
++    else:
++        road_terrain = {
++            "available": False,
++            "reason": "Both road and terrain collision exports are required for road-to-ground ray analysis.",
++        }
++
++    report = {
++        "schema_version": 1,
++        "stage": level,
++        "source_kind": "original stock stage (GameFS opened with include_mods=False)",
++        "workspace": str(out),
++        "source_collision_report": f"{stem}_collision.json",
++        "source_meshes": {
++            "road_obj": str(road_obj) if road_obj.is_file() else None,
++            "terrain_obj": str(terrain_obj) if terrain_obj.is_file() else None,
++            "road_ply": str(source_meshes["road"]) if "road" in source_meshes else None,
++            "terrain_ply": str(source_meshes["terrain"]) if "terrain" in source_meshes else None,
++        },
++        "open3d_mesh_statistics": stats,
++        "road_to_terrain_analysis": road_terrain,
++        "limitations": [
++            "These exports are baked collision meshes, not every visible render mesh in the level.",
++            "OBJ/PLY files are interchange geometry, not cooked Unreal .uasset/.umap packages.",
++            "This command does not edit or install the original game stage.",
++            "Ray tests are geometric diagnostics, not Unreal runtime physics queries.",
++        ],
++        "source_report_summary": {
++            "collision_mesh_count": source_report.get("collision_mesh_count"),
++            "collision_triangle_count": source_report.get("collision_triangle_count"),
++            "source_asset_inventory": source_report.get("source_asset_inventory"),
++        },
++    }
++    report_path = out / "open3d_stage_analysis.json"
++    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
++    (out / "WORKSPACE_README.txt").write_text(
++        "ACR Remixer geometry workspace\n"
++        f"Stage: {level}\n\n"
++        "Original collision OBJ files are in this folder.\n"
++        "Open3D interchange PLY files are in exchange/.\n"
++        "Blender-processed PLY copies and native .blend projects are written to processed/.\n\n"
++        "IMPORTANT: processed OBJ/PLY files are not automatically repacked into ACR cooked packages.\n"
++        "Do not copy them into the game's Paks folder.\n",
++        encoding="utf-8",
++    )
++    print(f"@progress 1.0 Open3D analysis complete: {report_path}", flush=True)
++    print(f"geometry workspace: {out}")
++    print(f"Open3D report: {report_path}")
++    return report
++
++
++def re_safe(value: str) -> str:
++    import re
++    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._") or "stage"
++
++
++def _stats_equivalent(before: dict[str, Any], after: dict[str, Any], operation: str) -> dict[str, Any]:
++    """Assess whether Blender altered the geometric surface during the selected operation."""
++    checks = {
++        "vertex_count_same": before["vertices"] == after["vertices"],
++        "triangle_count_same": before["triangles"] == after["triangles"],
++        "bounds_min_same_within_5e-3m": bool(np.allclose(
++            before["bounds_min_xyz_m"], after["bounds_min_xyz_m"], atol=5e-3, rtol=0.0)),
++        "bounds_max_same_within_5e-3m": bool(np.allclose(
++            before["bounds_max_xyz_m"], after["bounds_max_xyz_m"], atol=5e-3, rtol=0.0)),
++        "surface_area_same_within_1e-4_relative": bool(math.isclose(
++            before["surface_area_m2"], after["surface_area_m2"], rel_tol=1e-4, abs_tol=1e-6)),
++    }
++    return {
++        "operation": operation,
++        "checks": checks,
++        "geometry_unchanged": all(checks.values()) if operation == "recalculate_normals" else None,
++        "note": "The normals-only operation is expected to preserve geometry; a 5 mm bounds tolerance accommodates Blender mesh-coordinate float precision.",
++    }
++
++
++def process_workspace_with_blender(workspace: str, operation: str = "recalculate_normals") -> dict[str, Any]:
++    """Run Blender headlessly on copied PLY exports; never overwrite source meshes."""
++    root = Path(workspace).expanduser().resolve()
++    exchange = root / "exchange"
++    processed = root / "processed"
++    processed.mkdir(parents=True, exist_ok=True)
++    candidates = [p for p in (exchange / "road_collision.ply", exchange / "terrain_collision.ply") if p.is_file()]
++    if not candidates:
++        raise GeometryWorkspaceError(
++            f"No exchange/*.ply meshes found in {root}. Run 'Analyze selected stock stage' first."
++        )
++
++    blender = toolchain.find_blender()
++    if blender is None:
++        print("@progress 0.02 Blender is missing; downloading the managed Blender runtime", flush=True)
++        toolchain.install_blender(force=False)
++        blender = toolchain.find_blender()
++    if blender is None:
++        raise GeometryWorkspaceError("Blender installation completed but blender.exe could not be found")
++
++    results: list[dict[str, Any]] = []
++    total = len(candidates)
++    for index, source in enumerate(candidates):
++        label = source.stem.replace("_collision", "")
++        target = processed / f"{label}_collision_processed.ply"
++        blend_project = processed / f"{label}_collision_processed.blend"
++        print(f"@progress {0.08 + 0.70 * index / total:.3f} Blender processing {label} mesh", flush=True)
++        before_mesh = _read_open3d_mesh(source, f"input {label}")
++        before_stats = _mesh_stats(before_mesh, f"input {label}")
++        blender_result = toolchain.blender_process_mesh(
++            source, target, operation=operation, blend_output_path=blend_project
++        )
++        after_mesh = _read_open3d_mesh(target, f"Blender output {label}")
++        after_stats = _mesh_stats(after_mesh, f"Blender output {label}")
++        comparison = _stats_equivalent(before_stats, after_stats, operation)
++        if operation == "recalculate_normals" and not comparison["geometry_unchanged"]:
++            target.unlink(missing_ok=True)
++            raise GeometryWorkspaceError(
++                f"Blender normals-only pass unexpectedly changed {label} geometry; processed copy was discarded. "
++                f"Checks: {comparison['checks']}"
++            )
++        results.append({
++            "mesh": label,
++            "input": str(source),
++            "output": str(target),
++            "blend_project": str(blend_project),
++            "operation": operation,
++            "blender": blender_result,
++            "before": before_stats,
++            "after": after_stats,
++            "comparison": comparison,
++        })
++
++    report = {
++        "schema_version": 1,
++        "workspace": str(root),
++        "blender_executable": str(blender),
++        "operation": operation,
++        "processed_meshes": results,
++        "safety": {
++            "source_exchange_meshes_overwritten": False,
++            "game_packages_modified": False,
++            "game_stage_installed": False,
++        },
++        "limitations": [
++            "Blender processed exported collision PLY meshes only and saved editable .blend project files.",
++            "This result is not a cooked Unreal StaticMesh or BakedData package.",
++            "Package reintegration is a separate future implementation phase.",
++        ],
++    }
++    report_path = root / "blender_processing_report.json"
++    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
++    print(f"@progress 1.0 Blender mesh processing complete: {report_path}", flush=True)
++    print(f"processed mesh workspace: {processed}")
++    print(f"Blender report: {report_path}")
++    return report
+diff --git a/stagegen/toolchain.py b/stagegen/toolchain.py
+index 2c520be..f4b93aa 100644
+--- a/stagegen/toolchain.py
++++ b/stagegen/toolchain.py
+@@ -288,3 +288,110 @@ def status_lines() -> tuple[str, str]:
+         f"Blender {BLENDER_VERSION}: not installed (download on request)"
+     )
+     return open3d_status, blender_status
++
++
++BLENDER_MESH_OPERATIONS = ("recalculate_normals", "triangulate")
++
++
++def blender_worker_path() -> Path:
++    """Locate the Blender worker script in source or PyInstaller's data directory."""
++    frozen_root = getattr(sys, "_MEIPASS", None)
++    if frozen_root:
++        candidate = Path(frozen_root) / "stagegen" / "blender_worker.py"
++    else:
++        candidate = Path(__file__).with_name("blender_worker.py")
++    if not candidate.is_file():
++        raise ToolchainError(f"Bundled Blender worker script is missing: {candidate}")
++    return candidate
++
++
++def ensure_blender() -> Path:
++    """Return the managed Blender executable, installing the pinned build if needed."""
++    exe = find_blender()
++    if exe is not None:
++        return exe
++    install_blender(force=False)
++    exe = find_blender()
++    if exe is None:
++        raise ToolchainError("Blender installation finished but the executable is still unavailable")
++    return exe
++
++
++def blender_process_mesh(input_path: str | Path, output_path: str | Path,
++                         operation: str = "recalculate_normals", timeout_s: int = 900,
++                         blend_output_path: str | Path | None = None) -> dict:
++    """Run an allow-listed Blender background operation on a copied PLY mesh.
++
++    Blender is automatically provisioned on first use. The input is never
++    overwritten. Output and a JSON worker report are written beside the target.
++    """
++    if operation not in BLENDER_MESH_OPERATIONS:
++        raise ToolchainError(
++            f"Unsupported Blender mesh operation {operation!r}; allowed: {', '.join(BLENDER_MESH_OPERATIONS)}"
++        )
++    source = Path(input_path).expanduser().resolve()
++    target = Path(output_path).expanduser().resolve()
++    if source == target:
++        raise ToolchainError("Blender input and output paths must be different; source meshes are never overwritten")
++    if source.suffix.lower() != ".ply" or target.suffix.lower() != ".ply":
++        raise ToolchainError("Blender mesh bridge currently requires PLY input and output")
++    if not source.is_file() or source.stat().st_size == 0:
++        raise ToolchainError(f"Blender input PLY is missing or empty: {source}")
++
++    exe = ensure_blender()
++    worker = blender_worker_path()
++    target.parent.mkdir(parents=True, exist_ok=True)
++    report_path = target.with_suffix(target.suffix + ".blender.json")
++    blend_target = (Path(blend_output_path).expanduser().resolve() if blend_output_path
++                    else target.with_suffix(".blend"))
++    if blend_target in (source, target, report_path):
++        raise ToolchainError("Blender project path must be separate from input, mesh output and report")
++    report_path.unlink(missing_ok=True)
++    blend_target.unlink(missing_ok=True)
++    env = os.environ.copy()
++    try:
++        tool_root = _tool_root()
++        config_root = tool_root / "BlenderConfig" / BLENDER_VERSION
++        scripts_root = tool_root / "BlenderScripts" / BLENDER_VERSION
++        config_root.mkdir(parents=True, exist_ok=True)
++        scripts_root.mkdir(parents=True, exist_ok=True)
++        env["BLENDER_USER_CONFIG"] = str(config_root)
++        env["BLENDER_USER_SCRIPTS"] = str(scripts_root)
++    except ToolchainError:
++        # Development/testing on non-Windows may supply a Blender override.
++        pass
++
++    command = [
++        str(exe), "--background", "--factory-startup", "--python-exit-code", "17",
++        "--python", str(worker), "--", "--input", str(source), "--output", str(target),
++        "--report", str(report_path), "--blend-output", str(blend_target), "--operation", operation,
++    ]
++    print(f"@progress 0.05 Launching Blender background worker ({operation})", flush=True)
++    try:
++        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
++                                errors="replace", timeout=timeout_s, check=False, env=env)
++    except subprocess.TimeoutExpired as exc:
++        raise ToolchainError(f"Blender mesh operation timed out after {timeout_s} seconds") from exc
++    except OSError as exc:
++        raise ToolchainError(f"Could not launch Blender: {exc}") from exc
++    output = "\n".join(part for part in (result.stdout, result.stderr) if part)
++    if result.returncode != 0:
++        raise ToolchainError(
++            f"Blender mesh operation failed (exit {result.returncode}):\n{output[-5000:]}"
++        )
++    if not target.is_file() or target.stat().st_size == 0:
++        raise ToolchainError(f"Blender exited successfully but did not create output PLY: {target}\n{output[-2000:]}")
++    if not blend_target.is_file() or blend_target.stat().st_size == 0:
++        raise ToolchainError(f"Blender exited successfully but did not create its project file: {blend_target}\n{output[-2000:]}")
++    if not report_path.is_file():
++        raise ToolchainError(f"Blender did not create its worker report: {report_path}\n{output[-2000:]}")
++    try:
++        report = __import__("json").loads(report_path.read_text(encoding="utf-8"))
++    except Exception as exc:
++        raise ToolchainError(f"Blender worker report is invalid: {exc}") from exc
++    if not report.get("success") or report.get("operation") != operation:
++        raise ToolchainError(f"Blender worker report does not confirm the requested operation: {report}")
++    if Path(report.get("blend_project", "")).resolve() != blend_target:
++        raise ToolchainError("Blender worker report references a different project path than requested")
++    print(f"@progress 0.95 Blender finished {source.name}; project saved: {blend_target.name}", flush=True)
++    return report
+diff --git a/tests/test_mesh_workspace.py b/tests/test_mesh_workspace.py
+new file mode 100644
+index 0000000..5a5e3f6
+--- /dev/null
++++ b/tests/test_mesh_workspace.py
+@@ -0,0 +1,114 @@
++# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
++# SPDX-License-Identifier: MIT
++
++from __future__ import annotations
++
++import ast
++from pathlib import Path
++
++import numpy as np
++import pytest
++
++from stagegen import mesh_workspace, toolchain
++
++
++def _plane(o3d, z: float, size: float = 10.0):
++    half = size / 2.0
++    mesh = o3d.geometry.TriangleMesh()
++    mesh.vertices = o3d.utility.Vector3dVector([
++        (-half, -half, z), (half, -half, z), (half, half, z), (-half, half, z)
++    ])
++    mesh.triangles = o3d.utility.Vector3iVector([(0, 1, 2), (0, 2, 3)])
++    mesh.compute_triangle_normals()
++    mesh.compute_vertex_normals()
++    return mesh
++
++
++def test_blender_worker_is_valid_python_and_has_allowlisted_operations():
++    worker = Path(__file__).parents[1] / "stagegen" / "blender_worker.py"
++    source = worker.read_text(encoding="utf-8")
++    ast.parse(source)
++    assert 'choices=("recalculate_normals", "triangulate")' in source
++    assert 'input_path == output_path' in source
++    assert '--blend-output' in source
++    assert 'bpy.ops.wm.save_as_mainfile' in source
++
++
++def test_blender_operation_allowlist_rejects_arbitrary_scripts():
++    assert toolchain.BLENDER_MESH_OPERATIONS == ("recalculate_normals", "triangulate")
++
++
++def test_open3d_road_ground_raycast_uses_below_surface_and_reports_overhead_separately():
++    o3d = pytest.importorskip("open3d")
++    road = _plane(o3d, 2.0)
++    lower_terrain = _plane(o3d, 0.0)
++    upper_terrain = _plane(o3d, 5.0)
++    terrain = lower_terrain + upper_terrain
++
++    report = mesh_workspace._raycast_road_to_terrain(road, terrain, sample_count=500)
++
++    assert report["sample_count"] == 500
++    assert report["downward_ground_coverage_fraction"] == pytest.approx(1.0)
++    assert report["downward_ground_gap_m"]["p50"] == pytest.approx(2.0, abs=1e-3)
++    assert report["upward_surface_hits"] == 500
++    assert report["upward_surface_clearance_m"]["p50"] == pytest.approx(3.0, abs=1e-3)
++
++
++def test_open3d_mesh_stats_rejects_non_finite_geometry():
++    o3d = pytest.importorskip("open3d")
++    mesh = _plane(o3d, 0.0)
++    vertices = np.asarray(mesh.vertices).copy()
++    vertices[0, 0] = np.nan
++    mesh.vertices = o3d.utility.Vector3dVector(vertices)
++    with pytest.raises(mesh_workspace.GeometryWorkspaceError, match="NaN or infinite"):
++        mesh_workspace._mesh_stats(mesh, "test mesh")
++
++
++def test_blender_mesh_bridge_rejects_same_input_and_output_path(tmp_path: Path, monkeypatch):
++    source = tmp_path / "source.ply"
++    source.write_text("fixture", encoding="ascii")
++    monkeypatch.setattr(toolchain, "ensure_blender", lambda: tmp_path / "blender.exe")
++    with pytest.raises(toolchain.ToolchainError, match="different"):
++        toolchain.blender_process_mesh(source, source)
++
++
++def test_blender_mesh_bridge_rejects_non_ply_inputs(tmp_path: Path):
++    source = tmp_path / "source.obj"
++    source.write_text("fixture", encoding="ascii")
++    with pytest.raises(toolchain.ToolchainError, match="PLY"):
++        toolchain.blender_process_mesh(source, tmp_path / "out.ply")
++
++
++def test_blender_runner_requests_ply_and_native_blend_outputs(tmp_path: Path, monkeypatch):
++    import json
++    import subprocess
++
++    source = tmp_path / "road.ply"
++    target = tmp_path / "processed" / "road_processed.ply"
++    blend = tmp_path / "processed" / "road_processed.blend"
++    source.write_bytes(b"test PLY input")
++    monkeypatch.setattr(toolchain, "ensure_blender", lambda: tmp_path / "blender.exe")
++    monkeypatch.setattr(toolchain, "blender_worker_path", lambda: tmp_path / "worker.py")
++    monkeypatch.setattr(toolchain, "_tool_root", lambda: (_ for _ in ()).throw(toolchain.ToolchainError("test")))
++    captured = {}
++
++    def fake_run(command, **kwargs):
++        captured["command"] = command
++        target.parent.mkdir(parents=True, exist_ok=True)
++        target.write_bytes(b"processed PLY")
++        blend.write_bytes(b"native blend project")
++        report_path = target.with_suffix(target.suffix + ".blender.json")
++        report_path.write_text(json.dumps({
++            "success": True, "operation": "recalculate_normals",
++            "blend_project": str(blend),
++        }), encoding="utf-8")
++        return subprocess.CompletedProcess(command, 0, "ok", "")
++
++    monkeypatch.setattr(toolchain.subprocess, "run", fake_run)
++    report = toolchain.blender_process_mesh(source, target, blend_output_path=blend)
++    command = captured["command"]
++    assert "--background" in command
++    assert "--blend-output" in command
++    assert str(blend) in command
++    assert target.is_file() and blend.is_file()
++    assert report["blend_project"] == str(blend)
+diff --git a/tools/geometry/create_blender_bridge_fixture.py b/tools/geometry/create_blender_bridge_fixture.py
+new file mode 100644
+index 0000000..65c92a6
+--- /dev/null
++++ b/tools/geometry/create_blender_bridge_fixture.py
+@@ -0,0 +1,39 @@
++# SPDX-FileCopyrightText: 2026 hiro98 (vale981) and the ACR Remixer contributors
++# SPDX-License-Identifier: MIT
++"""Create tiny road/terrain PLY fixtures for the real Blender bridge CI test."""
++from __future__ import annotations
++
++import argparse
++from pathlib import Path
++
++import open3d as o3d
++
++
++def plane(z: float, size: float = 20.0) -> o3d.geometry.TriangleMesh:
++    half = size / 2.0
++    mesh = o3d.geometry.TriangleMesh()
++    mesh.vertices = o3d.utility.Vector3dVector([
++        (-half, -half, z), (half, -half, z),
++        (half, half, z), (-half, half, z),
++    ])
++    mesh.triangles = o3d.utility.Vector3iVector([(0, 1, 2), (0, 2, 3)])
++    mesh.compute_vertex_normals()
++    return mesh
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--out", required=True, type=Path)
++    args = parser.parse_args()
++    exchange = args.out / "exchange"
++    exchange.mkdir(parents=True, exist_ok=True)
++    for name, mesh in (("road_collision.ply", plane(2.0)), ("terrain_collision.ply", plane(0.0, 30.0))):
++        path = exchange / name
++        if not o3d.io.write_triangle_mesh(str(path), mesh, write_vertex_normals=True):
++            raise RuntimeError(f"Could not write test fixture: {path}")
++    print(f"Created deterministic bridge fixtures in {exchange}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
