@@ -1,3 +1,6 @@
 # backend (stagegen); matplotlib is optional (PNG previews in development only)
 numpy>=2.0
 scipy>=1.13
+
+# 3D geometry runtime embedded in the standalone ACR Remixer backend.
+open3d==0.20.0
