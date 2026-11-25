@@ -28,9 +28,13 @@ jobs:
           cache: pip
 
       - name: Install Open3D and StageGen dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest
+          # Install Open3D explicitly in the exact Python interpreter used by every later step.
+          # requirements.txt also pins it for the packaged ACR Remixer backend.
+          python -m pip install -r requirements.txt pytest "open3d==0.20.0"
+          python -c "import sys, open3d as o3d; print('Python:', sys.executable); print('Open3D:', o3d.__version__)"
 
       - name: Run Python geometry tests
         run: python -m pytest -q tests/test_mesh_workspace.py tests/test_toolchain.py

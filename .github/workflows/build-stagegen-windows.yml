@@ -27,9 +27,11 @@ jobs:
           architecture: "x64"
 
       - name: Install build and test dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-stagegen-build.txt
+          python -m pip install -r requirements-stagegen-build.txt open3d==0.20.0
+          python -c "import sys, open3d as o3d; print('Python:', sys.executable); print('Open3D:', o3d.__version__)"
 
       - name: Run StageGen regression tests
         run: python -m pytest -q tests/test_station_and_join_math.py tests/test_mesh_workspace.py tests/test_toolchain.py
