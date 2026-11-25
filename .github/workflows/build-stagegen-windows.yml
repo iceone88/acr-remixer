@@ -1,0 +1,77 @@
+name: Build StageGen Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "stagegen/**"
+      - "tests/test_station_and_join_math.py"
+      - "stagegen_entry.py"
+      - "requirements-stagegen-build.txt"
+      - ".github/workflows/build-stagegen-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up 64-bit Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Install build and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-stagegen-build.txt
+
+      - name: Run StageGen regression tests
+        run: python -m pytest -q tests/test_station_and_join_math.py tests/test_mesh_workspace.py tests/test_toolchain.py
+
+      - name: Build one-file Windows executable
+        shell: pwsh
+        run: >-
+          python -m PyInstaller
+          --noconfirm
+          --clean
+          --onefile
+          --console
+          --name acr-stagegen
+          --collect-submodules stagegen
+          --collect-all numpy
+          --collect-all scipy
+          --collect-all matplotlib
+          --collect-all open3d
+          --add-data "stagegen/build/empty_mod.pak;stagegen/build"
+          --add-data "stagegen/blender_worker.py;stagegen"
+          stagegen_entry.py
+
+      - name: Smoke-test executable
+        shell: pwsh
+        run: .\dist\acr-stagegen.exe --help
+
+      - name: Open3D runtime smoke test
+        shell: pwsh
+        run: .\dist\acr-stagegen.exe toolchain test-open3d
+
+      - name: Geometry workspace CLI smoke test
+        shell: pwsh
+        run: .\dist\acr-stagegen.exe geometry --help
+
+      - name: Add third-party notice
+        shell: pwsh
+        run: Copy-Item LICENSES/Open3D-MIT.txt dist/THIRD-PARTY-NOTICES-Open3D.txt -Force
+
+      - name: Upload executable and third-party notice
+        uses: actions/upload-artifact@v4
+        with:
+          name: acr-stagegen-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30

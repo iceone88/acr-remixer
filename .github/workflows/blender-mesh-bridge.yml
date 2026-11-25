@@ -1,0 +1,81 @@
+name: Blender Mesh Bridge Windows
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "stagegen/blender_worker.py"
+      - "stagegen/toolchain.py"
+      - "stagegen/mesh_workspace.py"
+      - "tests/test_mesh_workspace.py"
+      - "tools/geometry/create_blender_bridge_fixture.py"
+      - ".github/workflows/blender-mesh-bridge.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  blender-bridge:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          architecture: "x64"
+          cache: pip
+
+      - name: Install Open3D and StageGen dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Run Python geometry tests
+        run: python -m pytest -q tests/test_mesh_workspace.py tests/test_toolchain.py
+
+      - name: Download, verify and install Blender 5.2.5 LTS
+        run: python -m stagegen.cli toolchain install-blender
+
+      - name: Create synthetic road and terrain PLY inputs
+        shell: pwsh
+        run: python tools/geometry/create_blender_bridge_fixture.py --out "$env:RUNNER_TEMP/acr-blender-bridge"
+
+      - name: Process meshes in Blender background mode
+        shell: pwsh
+        run: >-
+          python -m stagegen.cli geometry process-workspace
+          --workspace "$env:RUNNER_TEMP/acr-blender-bridge"
+          --operation recalculate_normals
+
+      - name: Verify processed PLY and native Blender projects
+        shell: pwsh
+        run: |
+          $workspace = Join-Path $env:RUNNER_TEMP "acr-blender-bridge"
+          $processed = Join-Path $workspace "processed"
+          $required = @(
+            "road_collision_processed.ply",
+            "road_collision_processed.blend",
+            "terrain_collision_processed.ply",
+            "terrain_collision_processed.blend"
+          )
+          foreach ($name in $required) {
+            $path = Join-Path $processed $name
+            if (!(Test-Path $path) -or (Get-Item $path).Length -eq 0) {
+              throw "Missing or empty Blender output: $path"
+            }
+          }
+          $report = Join-Path $workspace "blender_processing_report.json"
+          if (!(Test-Path $report) -or (Get-Item $report).Length -eq 0) { throw "Missing Blender processing report: $report" }
+          Write-Host "Blender mesh bridge produced both editable PLY files and native .blend projects."
+
+      - name: Upload Blender bridge outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: acr-blender-mesh-bridge-test
+          path: |
+            ${{ runner.temp }}/acr-blender-bridge/processed/*
+            ${{ runner.temp }}/acr-blender-bridge/blender_processing_report.json
+          if-no-files-found: error
+          retention-days: 14
