@@ -44,7 +44,7 @@ jobs:
 
       - name: Python dependencies
         if: steps.changed.outputs.build == 'true'
-        run: python -m pip install -r requirements.txt pyinstaller
+        run: python -m pip install -r requirements.txt pyinstaller pytest
 
       - uses: dtolnay/rust-toolchain@stable
         if: steps.changed.outputs.build == 'true'
@@ -68,6 +68,18 @@ jobs:
         if: steps.changed.outputs.build == 'true'
         run: packaging/dist/stagegen-backend.exe --help
 
+      - name: Open3D native runtime smoke test
+        if: steps.changed.outputs.build == 'true'
+        run: packaging/dist/stagegen-backend.exe toolchain test-open3d
+
+      - name: Geometry workspace regression tests
+        if: steps.changed.outputs.build == 'true'
+        run: python -m pytest -q tests/test_mesh_workspace.py tests/test_toolchain.py
+
+      - name: Geometry CLI smoke test
+        if: steps.changed.outputs.build == 'true'
+        run: packaging/dist/stagegen-backend.exe geometry --help
+
       - name: GUI (embeds the backend)
         if: steps.changed.outputs.build == 'true'
         run: cargo build --release --manifest-path gui/Cargo.toml
@@ -88,6 +100,7 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item gui/target/release/acr-remixer.exe dist/acr-remixer.exe
+          Copy-Item LICENSES/Open3D-MIT.txt dist/THIRD-PARTY-NOTICES-Open3D.txt
           $notes = @(
             "**ACR Remixer $tag**: new rally stages for Assetto Corsa Rally, remixed from the stages you already own.",
             "",
@@ -100,7 +113,7 @@ jobs:
             "",
             "Bugs and ideas welcome: open an issue (the window's *Bug report -> Export bug report* helps)."
           ) -join "`n"
-          gh release create $tag dist/acr-remixer.exe --verify-tag --title "ACR Remixer $tag" --notes "$notes" --generate-notes
+          gh release create $tag dist/acr-remixer.exe dist/THIRD-PARTY-NOTICES-Open3D.txt --verify-tag --title "ACR Remixer $tag" --notes "$notes" --generate-notes
 
       - name: Publish the nightly pre-release
         if: steps.changed.outputs.build == 'true' && github.ref_type != 'tag'
@@ -112,6 +125,7 @@ jobs:
           $short = $env:GITHUB_SHA.Substring(0, 7)
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item gui/target/release/acr-remixer.exe dist/acr-remixer.exe
+          Copy-Item LICENSES/Open3D-MIT.txt dist/THIRD-PARTY-NOTICES-Open3D.txt
           $log = git log -15 --pretty=format:"- %s (%h)"
           $notes = @(
             "**ACR Remixer** nightly build $date (``$short``): new rally stages for Assetto Corsa Rally, remixed from the stages you already own.",
@@ -130,4 +144,4 @@ jobs:
           ) -join "`n"
           gh release delete nightly --yes --cleanup-tag 2>$null   # none on the first run
           $global:LASTEXITCODE = 0
-          gh release create nightly dist/acr-remixer.exe --prerelease --target $env:GITHUB_SHA --title "ACR Remixer nightly $date" --notes "$notes"
+          gh release create nightly dist/acr-remixer.exe dist/THIRD-PARTY-NOTICES-Open3D.txt --prerelease --target $env:GITHUB_SHA --title "ACR Remixer nightly $date" --notes "$notes"
