@@ -413,9 +413,81 @@ def _uninstall(a, quiet: bool = False) -> int:
     return _refresh_tables(a) if want else 0
 
 
+
+def _geometry_command(a) -> int:
+    """Extract stock collision geometry, analyse it, or process exported copies."""
+    try:
+        if a.geometry_action == "analyze-stage":
+            from .extract.real import DEFAULT_PAKS
+            from .mesh_workspace import analyse_stage
+            paks = os.path.normpath(a.paks or DEFAULT_PAKS)
+            report = analyse_stage(a.level, paks, a.out, a.corridor, a.samples)
+            road = report["open3d_mesh_statistics"].get("road", {}).get("triangles", 0)
+            terrain = report["open3d_mesh_statistics"].get("terrain", {}).get("triangles", 0)
+            print(f"stock geometry analysis complete: {a.level}; road triangles={road}, terrain triangles={terrain}")
+            return 0
+        if a.geometry_action == "process-workspace":
+            from .mesh_workspace import process_workspace_with_blender
+            report = process_workspace_with_blender(a.workspace, operation=a.operation)
+            print(f"Blender processed {len(report['processed_meshes'])} mesh export(s)")
+            return 0
+    except Exception as exc:
+        print(f"geometry operation failed: {type(exc).__name__}: {exc}")
+        return 1
+    return 2
+
+def _toolchain_command(a) -> int:
+    """Check or provision optional 3D tools used by the analysis engine."""
+    from . import toolchain
+
+    try:
+        if a.action == "status":
+            open3d_status, blender_status = toolchain.status_lines()
+            summary = f"{open3d_status} | {blender_status}"
+            print(f"@toolstatus {summary}")
+            print(open3d_status)
+            print(blender_status)
+            return 0  # status is informational; dedicated smoke commands report failures
+        if a.action == "test-open3d":
+            print(toolchain.open3d_smoke_test())
+            return 0
+        if a.action == "install-blender":
+            print(toolchain.install_blender(force=a.force))
+            open3d_status, blender_status = toolchain.status_lines()
+            print(f"@toolstatus {open3d_status} | {blender_status}")
+            return 0
+        if a.action == "test-blender":
+            print(toolchain.blender_smoke_test())
+            open3d_status, blender_status = toolchain.status_lines()
+            print(f"@toolstatus {open3d_status} | {blender_status}")
+            return 0
+    except toolchain.ToolchainError as exc:
+        print(f"3D toolchain error: {exc}")
+        return 1
+    except Exception as exc:
+        print(f"3D toolchain unexpected error: {type(exc).__name__}: {exc}")
+        return 1
+    return 2
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="acr-stagegen")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    geo = sub.add_parser("geometry", help="analyse stock-stage meshes and process editable mesh workspaces")
+    geo_sub = geo.add_subparsers(dest="geometry_action", required=True)
+    ga = geo_sub.add_parser("analyze-stage", help="extract and analyse a stock stage's baked road/terrain collision meshes")
+    ga.add_argument("--level", required=True, help="stock stage level, e.g. WalesS4HafrenSouth")
+    ga.add_argument("--paks", help="path to acr/Content/Paks")
+    ga.add_argument("--out", required=True, help="geometry workspace directory")
+    ga.add_argument("--corridor", type=float, default=30.0)
+    ga.add_argument("--samples", type=int, default=20_000, help="Open3D road surface ray samples (100..100000)")
+    gp = geo_sub.add_parser("process-workspace", help="run Blender on copied PLY mesh exports in a geometry workspace")
+    gp.add_argument("--workspace", required=True)
+    gp.add_argument("--operation", choices=("recalculate_normals", "triangulate"), default="recalculate_normals")
+
+    tc = sub.add_parser("toolchain", help="check or install integrated 3D geometry tools")
+    tc.add_argument("action", choices=("status", "test-open3d", "install-blender", "test-blender"))
+    tc.add_argument("--force", action="store_true", help="reinstall the managed Blender version")
     g = sub.add_parser("generate", help="generate a new stage layout")
     src = g.add_mutually_exclusive_group(required=True)
     src.add_argument("--fake", action="store_true", help="use synthetic source stages")
@@ -478,6 +550,10 @@ def main(argv=None):
     b.add_argument("--override", action="store_true",
                    help="replace the original stage instead of adding a new one (old behaviour)")
     a = ap.parse_args(argv)
+    if a.cmd == "toolchain":
+        return _toolchain_command(a)
+    if a.cmd == "geometry":
+        return _geometry_command(a)
     if a.cmd == "install":
         return _install(a)
     if a.cmd == "uninstall":

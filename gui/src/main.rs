@@ -694,6 +694,8 @@ enum JobKind {
     Build,
     ListPieces,
     Uninstall,
+    Toolchain,
+    Geometry,
 }
 
 struct Job {
@@ -728,6 +730,8 @@ struct App {
     shown_installed: Option<String>,
     /// feedback next to the share section ("Copied: ...")
     share_note: Option<String>,
+    /// Last status reported by the embedded Open3D / Blender toolchain.
+    tool_status: String,
 }
 
 /// What was clicked in the list of installed stages.
@@ -753,7 +757,8 @@ impl App {
                             source_preview: None, selected_source_piece: None, show_stock: false,
                             section_filter: String::new(), sequence_note: None, tab: Tab::Map,
                             installed: vec![], blocked: false, code_input: String::new(), job_prefs: None,
-                            shown_installed: None, share_note: None };
+                            shown_installed: None, share_note: None,
+                            tool_status: "Not checked. Open3D is bundled; Blender is managed on demand.".into() };
         app.preview = load_preview(&app.out_for(app.prefs.seed)).ok();     // reopen the last stage
         app.refresh_install_state();
         app
@@ -914,6 +919,69 @@ impl App {
         Ok(path)
     }
 
+    /// Run an embedded backend toolchain action without starting a stage build.
+    fn run_toolchain(&mut self, action: &str) {
+        if self.job.is_some() { return; }
+        self.log.clear();
+        self.log.push_str(&format!("=== 3D tools: {action} ===\n"));
+        self.tab = Tab::Log;
+        self.job_prefs = None;
+        let p = self.prefs.clone();
+        match backend_cmd(&p) {
+            Ok((prog, mut full, cwd)) => {
+                full.extend(["toolchain".to_string(), action.to_string()]);
+                let (tx, rx) = channel();
+                self.job = Some(Job { rx, remaining: vec![], total: 1, progress: 0.0,
+                                      phase: action.into(), kind: JobKind::Toolchain });
+                spawn_build(prog, cwd, full, None, tx);
+            }
+            Err(e) => self.log.push_str(&format!("backend: {e}\n")),
+        }
+    }
+
+    /// Run the stock-stage geometry extraction/analysis or Blender mesh-copy pass.
+    fn run_geometry_action(&mut self, action: &str) {
+        if self.job.is_some() { return; }
+        self.log.clear();
+        self.log.push_str(&format!("=== stock geometry: {action} / {} ===\n", self.prefs.stage));
+        self.tab = Tab::Log;
+        self.job_prefs = None;
+        let p = self.prefs.clone();
+        let workspace = PathBuf::from(&p.out_dir).join("geometry-workspaces").join(&p.stage);
+        match backend_cmd(&p) {
+            Ok((prog, mut full, cwd)) => {
+                full.extend(["geometry".to_string()]);
+                if action == "analyze-stage" {
+                    let paks = PathBuf::from(&p.acr_dir).join(r"acr\Content\Paks").display().to_string();
+                    full.extend(["analyze-stage".into(), "--level".into(), p.stage.clone(),
+                                 "--paks".into(), paks, "--out".into(), workspace.display().to_string()]);
+                } else {
+                    full.extend(["process-workspace".into(), "--workspace".into(), workspace.display().to_string(),
+                                 "--operation".into(), "recalculate_normals".into()]);
+                }
+                let (tx, rx) = channel();
+                self.job = Some(Job { rx, remaining: vec![], total: 1, progress: 0.0,
+                                      phase: action.into(), kind: JobKind::Geometry });
+                spawn_build(prog, cwd, full, None, tx);
+            }
+            Err(e) => self.log.push_str(&format!("backend: {e}\n")),
+        }
+    }
+
+    fn open_geometry_workspace(&mut self) {
+        let path = PathBuf::from(&self.prefs.out_dir).join("geometry-workspaces").join(&self.prefs.stage);
+        if !path.is_dir() {
+            self.log.push_str(&format!("geometry workspace does not exist yet: {}\n", path.display()));
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if let Err(e) = Command::new("explorer").arg(&path).spawn() {
+                self.log.push_str(&format!("could not open geometry workspace: {e}\n"));
+            }
+        }
+    }
+
     /// Load the untouched source stage's route, tile cuts and candidate pieces.
     fn list_segments(&mut self) {
         let p = self.prefs.clone();
@@ -985,6 +1053,9 @@ impl App {
                             job.progress = f.trim().parse().unwrap_or(job.progress);
                             job.phase = phase.to_string();
                             continue;
+                        }
+                        if let Some(status) = line.strip_prefix("@toolstatus ") {
+                            self.tool_status = status.to_string();
                         }
                         // `segments --json` can be a large single line. Keep it in
                         // the result payload rather than flooding the visible log.
@@ -1062,6 +1133,20 @@ impl App {
                         self.log.push_str("uninstall failed (see above)\n");
                     }
                     self.sync_firewall();
+                }
+                JobKind::Toolchain => {
+                    self.job = None;
+                    if !ok {
+                        self.log.push_str("3D toolchain action failed (see above).\n");
+                    }
+                }
+                JobKind::Geometry => {
+                    self.job = None;
+                    if !ok {
+                        self.log.push_str("stock geometry operation failed (see above).\n");
+                    } else {
+                        self.log.push_str("geometry workspace operation finished; source game packages were not modified.\n");
+                    }
                 }
             }
         }
@@ -1209,6 +1294,9 @@ impl eframe::App for App {
 
         let mut block_changed = false;
         let mut want_segments = false;
+        let mut want_tool_action: Option<&'static str> = None;
+        let mut want_geometry_action: Option<&'static str> = None;
+        let mut open_geometry_workspace = false;
         let mut want_add_piece = false;
         let mut inst_action: Option<InstAction> = None;
         let pv_seq = self.preview.as_ref().map(|pv| pv.sequence.clone()).filter(|s| !s.is_empty());
@@ -1321,6 +1409,32 @@ impl eframe::App for App {
                 egui::CollapsingHeader::new("Diagnostic (experimental)").show(ui, |ui| {
                     ui.checkbox(&mut p.debug_no_baked_shapes, "Remove primitive collision shapes")
                         .on_hover_text("TEST ONLY: removes box/sphere/capsule entries from baked collision while retaining triangle meshes. Some props may lose collision.");
+                });
+                egui::CollapsingHeader::new("3D geometry tools (Open3D / Blender)").show(ui, |ui| {
+                    ui.label("Open3D is bundled in the backend. Blender is downloaded on demand and runs headlessly; no Blender window is needed.");
+                    ui.add(egui::Label::new(egui::RichText::new(&self.tool_status).small()).wrap());
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add_enabled(!busy, egui::Button::new("Check tools")).clicked() {
+                            want_tool_action = Some("status");
+                        }
+                        if ui.add_enabled(!busy, egui::Button::new("Install / repair Blender")).clicked() {
+                            want_tool_action = Some("install-blender");
+                        }
+                    });
+                    ui.separator();
+                    ui.label("Selected stock stage geometry workspace:");
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add_enabled(!busy, egui::Button::new("Analyze stock stage with Open3D")).clicked() {
+                            want_geometry_action = Some("analyze-stage");
+                        }
+                        if ui.add_enabled(!busy, egui::Button::new("Edit collision mesh copies with Blender")).clicked() {
+                            want_geometry_action = Some("process-workspace");
+                        }
+                        if ui.add_enabled(!busy, egui::Button::new("Open workspace folder")).clicked() {
+                            open_geometry_workspace = true;
+                        }
+                    });
+                    ui.small("Exports the selected stock stage's baked road/terrain collision meshes. Open3D analyses them; Blender edits copied PLY meshes in background mode and saves processed PLY + native .blend project files. Original PAK files are never overwritten. Edited meshes are not yet repacked into cooked Unreal assets.");
                 });
                 ui.checkbox(&mut p.install, "Install into the game (closes ACR)");
                 ui.add_enabled(p.install, egui::Checkbox::new(&mut p.launch, "Start ACR afterwards"));
@@ -1467,6 +1581,15 @@ impl eframe::App for App {
         }
         if want_segments && !busy {
             self.list_segments();
+        }
+        if let Some(action) = want_tool_action.filter(|_| !busy) {
+            self.run_toolchain(action);
+        }
+        if let Some(action) = want_geometry_action.filter(|_| !busy) {
+            self.run_geometry_action(action);
+        }
+        if open_geometry_workspace && !busy {
+            self.open_geometry_workspace();
         }
         match inst_action {
             Some(InstAction::Show(i)) => self.show_installed(&i),
